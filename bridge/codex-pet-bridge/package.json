@@ -1,0 +1,48 @@
+{
+  "name": "codex-pet-bridge",
+  "version": "0.2.0",
+  "description": "Local-first bridge that turns AI agent status into pet-friendly events for desktop pets and XiaoZhi devices.",
+  "type": "module",
+  "keywords": [
+    "codex",
+    "codex-pet",
+    "claude-code",
+    "desktop-pet",
+    "xiaozhi",
+    "esp32",
+    "mcp",
+    "local-first",
+    "webhook",
+    "sse",
+    "server-sent-events",
+    "ai-agent",
+    "notification-bridge"
+  ],
+  "homepage": "https://github.com/vcxzvfe/codex-pet-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/vcxzvfe/codex-pet-bridge/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vcxzvfe/codex-pet-bridge.git"
+  },
+  "bin": {
+    "pet-bridge": "./src/bridge-server.js",
+    "pet-claude-hook": "./src/claude-hook.js",
+    "pet-mcp-server": "./src/mcp-server.js",
+    "pet-notify": "./src/notify-client.js",
+    "pet-agent-sync": "./src/agent-sync.js"
+  },
+  "scripts": {
+    "start": "node ./src/bridge-server.js",
+    "hook": "node ./src/claude-hook.js",
+    "mcp": "node ./src/mcp-server.js",
+    "notify": "node ./src/notify-client.js",
+    "sync:tick": "node ./src/agent-sync.js --tick",
+    "smoke": "node ./test/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

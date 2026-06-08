@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+*.log
+events.jsonl
+bridge-state.json
+bridge-state.json.*.tmp
+test/events.jsonl
+test/bridge-state.json
+test/bridge-state.json.*.tmp
+docs/CRYO_*

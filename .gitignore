@@ -1,0 +1,15 @@
+.DS_Store
+
+# PlatformIO
+.pio/
+
+# Node
+node_modules/
+
+# Runtime bridge state
+bridge/codex-pet-bridge/bridge-state.json
+bridge/codex-pet-bridge/events.jsonl
+bridge/codex-pet-bridge/*.log
+
+# Local secrets
+**/.env
