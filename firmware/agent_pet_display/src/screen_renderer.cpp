@@ -8,6 +8,7 @@
 #include <string>
 
 #include "ST7305_U8g2.h"
+#include "doto_font.h"
 #include "pet_sprites.h"
 #include "screen_layout.h"
 #include "usage_visuals.h"
@@ -65,6 +66,49 @@ std::string clipTextToPixelWidth(const std::string& text, int maxWidth) {
   return "..";
 }
 
+std::string clipDotoTextToPixelWidth(const std::string& text, int maxWidth, DotoFontSize size) {
+  if (maxWidth <= 0 || text.empty()) {
+    return maxWidth <= 0 ? std::string() : text;
+  }
+  if (dotoTextWidth(size, text.c_str()) <= maxWidth) {
+    return text;
+  }
+
+  for (size_t length = text.size(); length > 0; --length) {
+    const std::string candidate = text.substr(0, length - 1) + "..";
+    if (dotoTextWidth(size, candidate.c_str()) <= maxWidth) {
+      return candidate;
+    }
+  }
+  return "..";
+}
+
+void drawDotoText(DotoFontSize size, int x, int y, const std::string& text) {
+  if (!gU8g2 || text.empty()) {
+    return;
+  }
+  gU8g2->setDrawColor(0);
+  int cursorX = x;
+  const int height = dotoTextHeight(size);
+  for (char ch : text) {
+    const int advance = dotoGlyphAdvance(size, ch);
+    for (int row = 0; row < height; ++row) {
+      int runStart = -1;
+      for (int col = 0; col <= advance; ++col) {
+        const bool isOn = col < advance &&
+                          dotoGlyphPixel(size, ch, static_cast<uint8_t>(col), static_cast<uint8_t>(row));
+        if (isOn && runStart < 0) {
+          runStart = col;
+        } else if (!isOn && runStart >= 0) {
+          gU8g2->drawHLine(cursorX + runStart, y + row, col - runStart);
+          runStart = -1;
+        }
+      }
+    }
+    cursorX += advance;
+  }
+}
+
 std::string heroStatusText(const DisplayState& display) {
   if (display.offline) {
     return "OFFLINE";
@@ -95,8 +139,10 @@ int chipWidthForLabel(const char* label, int minWidth, int maxWidth) {
 void drawMetricCard(const ScreenRect& rect, const char* label, const std::string& value) {
   gU8g2->drawRFrame(rect.x, rect.y, rect.w, rect.h, 5);
   drawLabelChip(rect.x + 8, rect.y + 5, chipWidthForLabel(label, 28, 42), label);
-  gU8g2->setFont(u8g2_font_profont17_tf);
-  gU8g2->drawStr(rect.x + 72, rect.y + 6, clipText(value, 18).c_str());
+  drawDotoText(DotoFontSize::Medium,
+               rect.x + 72,
+               rect.y + 5,
+               clipDotoTextToPixelWidth(value, rect.w - 84, DotoFontSize::Medium));
 }
 
 void drawRightInfoCard(const ScreenRect& rect,
@@ -105,10 +151,14 @@ void drawRightInfoCard(const ScreenRect& rect,
                        const std::string& line2) {
   gU8g2->drawRFrame(rect.x, rect.y, rect.w, rect.h, 6);
   drawLabelChip(rect.x + 8, rect.y + 6, 42, label);
-  gU8g2->setFont(u8g2_font_profont17_tf);
-  gU8g2->drawStr(rect.x + 10, rect.y + 22, clipText(line1, 11).c_str());
-  gU8g2->setFont(u8g2_font_t0_11b_tf);
-  gU8g2->drawStr(rect.x + 10, rect.y + 40, clipText(line2, 13).c_str());
+  drawDotoText(DotoFontSize::Medium,
+               rect.x + 10,
+               rect.y + 22,
+               clipDotoTextToPixelWidth(line1, rect.w - 20, DotoFontSize::Medium));
+  drawDotoText(DotoFontSize::Small,
+               rect.x + 10,
+               rect.y + 41,
+               clipDotoTextToPixelWidth(line2, rect.w - 20, DotoFontSize::Small));
 }
 
 void drawQuotaCard(const ScreenRect& rect, const char* label, const std::string& value) {
@@ -141,20 +191,28 @@ void drawTimeCard(const DisplayState& display) {
   const ScreenRect rect = overviewTimeCardRect();
   gU8g2->drawRFrame(rect.x, rect.y, rect.w, rect.h, 6);
   drawLabelChip(rect.x + 10, rect.y + 5, 30, "TIME");
-  gU8g2->setFont(u8g2_font_t0_22b_tn);
-  gU8g2->drawStr(rect.x + 12, rect.y + 17, clipText(display.sidebarTime, 8).c_str());
-  gU8g2->setFont(u8g2_font_t0_13b_tf);
-  gU8g2->drawStr(rect.x + 12, rect.y + 41, clipText(display.sidebarDate, 14).c_str());
+  drawDotoText(DotoFontSize::Hero,
+               rect.x + 12,
+               rect.y + 17,
+               clipDotoTextToPixelWidth(display.sidebarTime, rect.w - 24, DotoFontSize::Hero));
+  drawDotoText(DotoFontSize::Small,
+               rect.x + 12,
+               rect.y + 41,
+               clipDotoTextToPixelWidth(display.sidebarDate, rect.w - 24, DotoFontSize::Small));
 }
 
 void drawStatusCard(const DisplayState& display) {
   const ScreenRect rect = overviewStatusCardRect();
   gU8g2->drawRFrame(rect.x, rect.y, rect.w, rect.h, 6);
   drawLabelChip(rect.x + 10, rect.y + 6, 42, "STATE");
-  gU8g2->setFont(u8g2_font_profont22_tf);
-  gU8g2->drawStr(rect.x + 10, rect.y + 19, clipText(heroStatusText(display), 14).c_str());
-  gU8g2->setFont(u8g2_font_t0_13b_tf);
-  gU8g2->drawStr(rect.x + 10, rect.y + 51, clipText(display.taskLine, 24).c_str());
+  drawDotoText(DotoFontSize::Hero,
+               rect.x + 10,
+               rect.y + 21,
+               clipDotoTextToPixelWidth(heroStatusText(display), rect.w - 20, DotoFontSize::Hero));
+  drawDotoText(DotoFontSize::Small,
+               rect.x + 10,
+               rect.y + 52,
+               clipDotoTextToPixelWidth(display.taskLine, rect.w - 20, DotoFontSize::Small));
 }
 
 void drawPetBitmap(const PetBitmapFrame& frame, int x, int y) {
@@ -175,8 +233,10 @@ void drawPetBitmap(const PetBitmapFrame& frame, int x, int y) {
 void drawUsageMiniCard(int x, int y, int width, const char* label, const std::string& line1, const std::string& line2) {
   gU8g2->drawRFrame(x, y, width, kUsageSmallCardHeight, 5);
   drawLabelChip(x + 8, y + 6, chipWidthForLabel(label, 28, 44), label);
-  gU8g2->setFont(u8g2_font_t0_15b_tf);
-  gU8g2->drawStr(x + 8, y + 17, clipText(line1, 15).c_str());
+  drawDotoText(DotoFontSize::Medium,
+               x + 8,
+               y + 16,
+               clipDotoTextToPixelWidth(line1, width - 16, DotoFontSize::Medium));
   gU8g2->setFont(u8g2_font_t0_11b_tf);
   gU8g2->drawStr(x + 8, y + 28, clipText(line2, 20).c_str());
 }
@@ -187,8 +247,10 @@ void drawUsageDetailCard(int y,
                          const std::string& hint) {
   gU8g2->drawRFrame(kUsageBigCardX, y, kUsageBigCardWidth, kUsageBigCardHeight, 6);
   drawLabelChip(kUsageBigCardX + 8, y + 6, chipWidthForLabel(label, 34, 56), label);
-  gU8g2->setFont(u8g2_font_profont22_tf);
-  gU8g2->drawStr(kUsageBigCardX + 8, y + 16, clipText(value, 28).c_str());
+  drawDotoText(DotoFontSize::Medium,
+               kUsageBigCardX + 8,
+               y + 16,
+               clipDotoTextToPixelWidth(value, kUsageBigCardWidth - 16, DotoFontSize::Medium));
   gU8g2->setFont(u8g2_font_t0_11b_tf);
   gU8g2->drawStr(kUsageBigCardX + 8, y + 32, clipText(hint, 40).c_str());
 }
@@ -198,8 +260,10 @@ void drawPet(const DisplayState& display, uint32_t tick) {
   const ScreenRect rect = overviewPetPanelRect();
   gU8g2->drawRFrame(rect.x, rect.y, rect.w, rect.h, 8);
   gU8g2->drawRFrame(rect.x + 5, rect.y + 5, rect.w - 10, 14, 4);
-  gU8g2->setFont(u8g2_font_t0_11b_tf);
-  gU8g2->drawStr(rect.x + 10, rect.y + 8, clipText(display.buddyBubble, 11).c_str());
+  drawDotoText(DotoFontSize::Small,
+               rect.x + 10,
+               rect.y + 7,
+               clipDotoTextToPixelWidth(display.buddyBubble, rect.w - 20, DotoFontSize::Small));
   const int spriteX = rect.x + (rect.w - sprite.width) / 2;
   const int spriteY = rect.y + 24;
   drawPetBitmap(sprite, spriteX, spriteY);
@@ -223,10 +287,11 @@ void renderOverviewPage(const DisplayState& display, const PowerState& power) {
 }
 
 void renderUsagePage(const DisplayState& display) {
-  gU8g2->setFont(u8g2_font_t0_15b_tf);
-  gU8g2->drawStr(kUsagePanelX, kUsageHeaderY, "USAGE DETAILS");
-  gU8g2->setFont(u8g2_font_t0_11b_tf);
-  gU8g2->drawStr(kUsagePanelX + 138, kUsageHeaderY + 3, clipText(display.sidebarAgent, 20).c_str());
+  drawDotoText(DotoFontSize::Medium, kUsagePanelX, kUsageHeaderY - 2, "USAGE DETAILS");
+  drawDotoText(DotoFontSize::Small,
+               kUsagePanelX + 144,
+               kUsageHeaderY + 1,
+               clipDotoTextToPixelWidth(display.sidebarAgent, kUsagePanelWidth - 150, DotoFontSize::Small));
 
   drawUsageMiniCard(kUsagePanelX, kUsageSmallCardY, kUsageSmallCardWidth, "TIME", display.sidebarTime, display.sidebarDate);
   drawUsageMiniCard(kUsagePanelX + kUsageSmallCardWidth + 12,
@@ -287,19 +352,19 @@ void ScreenRenderer::render(const DisplayState& display, const PowerState& power
   gU8g2->setDrawColor(0);
   gU8g2->drawFrame(0, 0, kLcdWidth, kLcdHeight);
   gU8g2->drawHLine(8, kTopBarHeight, kLcdWidth - 16);
-  gU8g2->setFont(u8g2_font_t0_11b_tf);
-  gU8g2->drawStr(12, 4, clipText(display.linkLabel, 10).c_str());
 
-  gU8g2->setFont(u8g2_font_profont12_tf);
-  const int batteryWidth = gU8g2->getStrWidth(battery);
+  const int batteryWidth = dotoTextWidth(DotoFontSize::Small, battery);
   const int batteryX = kLcdWidth - 12 - batteryWidth;
   const int focusChipLeft = drawFocusChip(display, batteryX - 8);
-  gU8g2->setFont(u8g2_font_profont12_tf);
-  gU8g2->drawStr(92, 5, clipText(display.sidebarClimate, 12).c_str());
+  drawDotoText(DotoFontSize::Small, 12, 5, clipDotoTextToPixelWidth(display.linkLabel, 76, DotoFontSize::Small));
+  drawDotoText(DotoFontSize::Small, 92, 5, clipDotoTextToPixelWidth(display.sidebarClimate, 72, DotoFontSize::Small));
   const int sourceX = 170;
   const int sourceWidth = focusChipLeft - sourceX - 8;
-  gU8g2->drawStr(sourceX, 5, clipTextToPixelWidth(display.sourceLabel, sourceWidth).c_str());
-  gU8g2->drawStr(batteryX, 5, battery);
+  drawDotoText(DotoFontSize::Small,
+               sourceX,
+               5,
+               clipDotoTextToPixelWidth(display.sourceLabel, sourceWidth, DotoFontSize::Small));
+  drawDotoText(DotoFontSize::Small, batteryX, 5, battery);
 
   if (display.page == ScreenPage::Usage) {
     renderUsagePage(display);
@@ -311,9 +376,10 @@ void ScreenRenderer::render(const DisplayState& display, const PowerState& power
   const char* footerLabel = display.page == ScreenPage::Usage ? "KEYS" : "LIVE";
   gU8g2->drawHLine(8, footerY, kLcdWidth - 16);
   drawLabelChip(12, footerY + 6, chipWidthForLabel(footerLabel, 32, 40), footerLabel);
-  gU8g2->setFont(u8g2_font_profont15_tf);
-  gU8g2->drawStr(58, footerY + 5, clipText(display.footerMessage, 34).c_str());
-  gU8g2->setFont(u8g2_font_t0_11b_tf);
-  gU8g2->drawStr(338, footerY + 9, display.page == ScreenPage::Usage ? "P2/2" : "P1/2");
+  drawDotoText(DotoFontSize::Small,
+               58,
+               footerY + 7,
+               clipDotoTextToPixelWidth(display.footerMessage, 260, DotoFontSize::Small));
+  drawDotoText(DotoFontSize::Small, 338, footerY + 7, display.page == ScreenPage::Usage ? "P2/2" : "P1/2");
   gU8g2->sendBuffer();
 }

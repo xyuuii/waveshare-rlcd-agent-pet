@@ -168,6 +168,28 @@ const char* buddyBubbleText(const std::string& detail, AgentStatus status) {
   }
 }
 
+PetMode runningPetMode(const std::string& detail) {
+  if (detail == "thinking") {
+    return PetMode::Thinking;
+  }
+  if (detail == "searching") {
+    return PetMode::Searching;
+  }
+  if (detail == "tool-use") {
+    return PetMode::ToolUse;
+  }
+  if (detail == "started") {
+    return PetMode::Starting;
+  }
+  if (detail == "almost-done") {
+    return PetMode::AlmostDone;
+  }
+  if (detail == "working") {
+    return PetMode::Working;
+  }
+  return PetMode::Working;
+}
+
 std::string tickerText(const std::string& statusDetail, const std::string& task, const std::string& updatedAt) {
   if (!task.empty()) {
     return statusDetail + "  " + task;
@@ -329,7 +351,7 @@ DisplayState deriveDisplayState(const AgentState& agent,
 
   switch (agent.status) {
     case AgentStatus::Running:
-      view.petMode = PetMode::Busy;
+      view.petMode = runningPetMode(agent.statusDetail);
       break;
     case AgentStatus::NeedsAttention:
       view.petMode = PetMode::Attention;

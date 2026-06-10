@@ -23,6 +23,12 @@ enum class AgentStatus {
 enum class PetMode {
   Sleep,
   Idle,
+  Starting,
+  Thinking,
+  Searching,
+  ToolUse,
+  Working,
+  AlmostDone,
   Busy,
   Attention,
   Celebrate,

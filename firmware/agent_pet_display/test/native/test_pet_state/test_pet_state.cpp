@@ -6,7 +6,7 @@ void setUp(void) {}
 
 void tearDown(void) {}
 
-void test_running_agent_maps_to_busy_pet(void) {
+void test_thinking_agent_gets_dedicated_pet_mode(void) {
   AgentState agent{};
   agent.source = SourceKind::Codex;
   agent.status = AgentStatus::Running;
@@ -19,7 +19,7 @@ void test_running_agent_maps_to_busy_pet(void) {
 
   const DisplayState view = deriveDisplayState(agent, power, environment, ScreenPage::Overview);
 
-  TEST_ASSERT_EQUAL(static_cast<int>(PetMode::Busy), static_cast<int>(view.petMode));
+  TEST_ASSERT_NOT_EQUAL(static_cast<int>(PetMode::Busy), static_cast<int>(view.petMode));
   TEST_ASSERT_EQUAL_STRING("THINKING", view.statusDetail.c_str());
   TEST_ASSERT_EQUAL_STRING("10:24:30", view.sidebarTime.c_str());
   TEST_ASSERT_EQUAL_STRING("2026/06/08", view.sidebarDate.c_str());
@@ -27,6 +27,36 @@ void test_running_agent_maps_to_busy_pet(void) {
   TEST_ASSERT_EQUAL_STRING("CODEX THNK", view.sidebarAgent.c_str());
   TEST_ASSERT_EQUAL_STRING("thinking...", view.buddyBubble.c_str());
   TEST_ASSERT_EQUAL_STRING("THINKING  Sync bridge", view.footerMessage.c_str());
+}
+
+void test_running_details_drive_distinct_pet_modes(void) {
+  AgentState agent{};
+  agent.source = SourceKind::Codex;
+  agent.status = AgentStatus::Running;
+  agent.task = "Trace live status";
+  agent.connected = true;
+  const PowerState power{3800, 60, false, false, true};
+  const EnvironmentState environment{};
+
+  agent.statusDetail = "thinking";
+  const DisplayState thinking = deriveDisplayState(agent, power, environment, ScreenPage::Overview);
+
+  agent.statusDetail = "searching";
+  const DisplayState searching = deriveDisplayState(agent, power, environment, ScreenPage::Overview);
+
+  agent.statusDetail = "tool-use";
+  const DisplayState toolUse = deriveDisplayState(agent, power, environment, ScreenPage::Overview);
+
+  agent.statusDetail = "working";
+  const DisplayState working = deriveDisplayState(agent, power, environment, ScreenPage::Overview);
+
+  agent.statusDetail = "almost-done";
+  const DisplayState almostDone = deriveDisplayState(agent, power, environment, ScreenPage::Overview);
+
+  TEST_ASSERT_NOT_EQUAL(static_cast<int>(thinking.petMode), static_cast<int>(searching.petMode));
+  TEST_ASSERT_NOT_EQUAL(static_cast<int>(searching.petMode), static_cast<int>(toolUse.petMode));
+  TEST_ASSERT_NOT_EQUAL(static_cast<int>(toolUse.petMode), static_cast<int>(working.petMode));
+  TEST_ASSERT_NOT_EQUAL(static_cast<int>(working.petMode), static_cast<int>(almostDone.petMode));
 }
 
 void test_low_battery_biases_pet_to_tired(void) {
@@ -206,7 +236,8 @@ void test_wifi_reconnecting_gets_distinct_status_from_bridge_offline(void) {
 
 int main(void) {
   UNITY_BEGIN();
-  RUN_TEST(test_running_agent_maps_to_busy_pet);
+  RUN_TEST(test_thinking_agent_gets_dedicated_pet_mode);
+  RUN_TEST(test_running_details_drive_distinct_pet_modes);
   RUN_TEST(test_low_battery_biases_pet_to_tired);
   RUN_TEST(test_usage_page_keeps_usage_values_and_marks_page);
   RUN_TEST(test_searching_detail_gets_own_screen_label);
