@@ -1,0 +1,27 @@
+{
+  "id": "openclaw-pet-bridge",
+  "name": "OpenClaw Pet Bridge",
+  "description": "Forward OpenClaw agent status to codex-pet-bridge.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "bridgeUrl": {
+        "type": "string"
+      },
+      "source": {
+        "type": "string"
+      },
+      "taskPrefix": {
+        "type": "string"
+      },
+      "notifyOnCompleted": {
+        "type": "boolean"
+      },
+      "notifyOnError": {
+        "type": "boolean"
+      }
+    }
+  }
+}

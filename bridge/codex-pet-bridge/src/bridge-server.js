@@ -8,6 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { inferCodexRealtimeStateFromLines, pickCurrentState } from "./codex-session-status.js";
+import { buildVisibleAgentSlots, resolveFocusSelection } from "./device-focus.js";
 
 const PORT = numberFromEnv("PET_BRIDGE_PORT", 17366);
 const HOST = process.env.PET_BRIDGE_HOST || "127.0.0.1";
@@ -129,7 +130,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/esp32/poll") {
       const ackId = url.searchParams.get("ack");
       if (ackId) await ackNotification(ackId);
-      sendJson(res, 200, await compactDeviceState());
+      const focus = stringValue(url.searchParams.get("focus")) || "auto";
+      sendJson(res, 200, await compactDeviceState({ focus }));
       return;
     }
 
@@ -393,15 +395,20 @@ async function ackAllNotifications() {
   return count;
 }
 
-async function compactDeviceState() {
+async function compactDeviceState(options = {}) {
   const notification = unreadNotifications().at(0) || null;
   const eventCurrent = recentEvents.at(-1) || null;
   const latestCodexEvent = [...recentEvents].reverse().find((item) => sourceFamily(item.source) === "codex") || null;
-  const [usage, codexRealtime] = await Promise.all([
-    loadCodexUsageSummary(),
-    loadCodexRealtimeState(latestCodexEvent)
-  ]);
-  const current = pickCurrentState(eventCurrent, codexRealtime);
+  const codexRealtime = await loadCodexRealtimeState(latestCodexEvent);
+  const autoCurrent = pickCurrentState(eventCurrent, codexRealtime);
+  const visibleSlots = buildVisibleAgentSlots(recentEvents, codexRealtime);
+  const selected = resolveFocusSelection({
+    focus: options.focus,
+    slots: visibleSlots,
+    autoCurrent: slotStateFromCurrent(autoCurrent)
+  });
+  const current = materializeCurrentState(selected, autoCurrent);
+  const usage = await loadUsageSummary(current);
   return {
     ok: true,
     unread_count: unreadNotifications().length,
@@ -409,21 +416,73 @@ async function compactDeviceState() {
     task: current?.task || "",
     updated_at: current?.time || "",
     current_status: current?.status || "idle",
+    focus_mode: selected.mode,
+    focus_id: selected.focusId,
+    focus_index: selected.focusIndex,
+    focus_count: selected.focusCount,
+    agents: visibleSlots.map(compactAgentSlot),
     usage,
-    notification: notification
-      ? {
-          id: notification.id,
-          source: notification.source,
-          task: notification.task,
-          status: notification.status,
-          priority: notification.priority,
-          title: notification.title,
-          message: notification.message,
-          project: notification.workspace,
-          time: notification.time
-        }
-      : null
+    notification: notification ? compactNotification(notification) : null
   };
+}
+
+function compactAgentSlot(slot) {
+  return {
+    id: slot.id,
+    source: slot.source,
+    task: slot.task,
+    status: slot.status,
+    updated_at: slot.updated_at
+  };
+}
+
+function compactNotification(notification) {
+  return {
+    id: notification.id,
+    source: notification.source,
+    task: notification.task,
+    status: notification.status,
+    priority: notification.priority,
+    title: notification.title,
+    message: notification.message,
+    project: notification.workspace,
+    time: notification.time
+  };
+}
+
+function slotStateFromCurrent(current) {
+  if (!current) return null;
+  return {
+    source: current.source || "",
+    task: current.task || "",
+    status: current.status || "idle",
+    updated_at: current.time || "",
+    sessionId: current.sessionId || "",
+    workspace: current.workspace || ""
+  };
+}
+
+function materializeCurrentState(selected, autoCurrent) {
+  if (selected.mode !== "pinned") {
+    return autoCurrent;
+  }
+  const current = selected.current;
+  if (!current) return autoCurrent;
+  return {
+    source: current.source || "",
+    task: current.task || "",
+    status: current.status || "idle",
+    time: current.updated_at || "",
+    sessionId: current.sessionId || "",
+    workspace: current.workspace || ""
+  };
+}
+
+async function loadUsageSummary(current) {
+  if (!current?.source || sourceFamily(current.source) === "codex") {
+    return await loadCodexUsageSummary();
+  }
+  return buildLocalActivityUsage(current);
 }
 
 async function loadCodexUsageSummary() {
@@ -433,14 +492,38 @@ async function loadCodexUsageSummary() {
 
   const latestRolloutPath = await latestTopLevelRolloutPath();
   if (!latestRolloutPath) {
-    usageCache = { loadedAt: Date.now(), data: null };
-    return null;
+    const empty = usageSummary({
+      today: "--",
+      context: "--",
+      quota: "--",
+      todayLabel: "TODAY",
+      todayHint: "Today total in this workspace",
+      contextLabel: "CONTEXT",
+      contextHint: "Current turn tokens / model window",
+      quotaLabel: "QUOTA",
+      quotaHint: "Remaining 5-hour and weekly limits",
+      quotaStyle: "quota"
+    });
+    usageCache = { loadedAt: Date.now(), data: empty };
+    return empty;
   }
 
   const latestTokenPayload = await readLastTokenCountPayload(latestRolloutPath);
   if (!latestTokenPayload) {
-    usageCache = { loadedAt: Date.now(), data: null };
-    return null;
+    const empty = usageSummary({
+      today: "--",
+      context: "--",
+      quota: "--",
+      todayLabel: "TODAY",
+      todayHint: "Today total in this workspace",
+      contextLabel: "CONTEXT",
+      contextHint: "Current turn tokens / model window",
+      quotaLabel: "QUOTA",
+      quotaHint: "Remaining 5-hour and weekly limits",
+      quotaStyle: "quota"
+    });
+    usageCache = { loadedAt: Date.now(), data: empty };
+    return empty;
   }
 
   const dailyTotalTokens = await sumTodayTopLevelTokens();
@@ -451,13 +534,20 @@ async function loadCodexUsageSummary() {
   const secondaryUsed = numberFromValue(latestTokenPayload.rate_limits?.secondary?.used_percent, null);
 
   const todayTokens = dailyTotalTokens || totalTokens;
-  const usage = {
+  const usage = usageSummary({
     today: todayTokens > 0 ? `${abbrevNumber(todayTokens)} tok` : "--",
     context: contextWindow > 0 && lastTurnTokens > 0
       ? `${abbrevNumber(lastTurnTokens)} / ${abbrevNumber(contextWindow)}`
       : "--",
-    quota: formatQuotaLabel(primaryUsed, secondaryUsed)
-  };
+    quota: formatQuotaLabel(primaryUsed, secondaryUsed),
+    todayLabel: "TODAY",
+    todayHint: "Today total in this workspace",
+    contextLabel: "CONTEXT",
+    contextHint: "Current turn tokens / model window",
+    quotaLabel: "QUOTA",
+    quotaHint: "Remaining 5-hour and weekly limits",
+    quotaStyle: "quota"
+  });
 
   usageCache = { loadedAt: Date.now(), data: usage };
   return usage;
@@ -481,7 +571,9 @@ async function loadCodexRealtimeState(latestCodexEvent) {
       source: latestCodexEvent?.source || `${CODEX_SOURCE_PREFIX}-codex`,
       task: latestCodexEvent?.task || `${CODEX_SOURCE_PREFIX}-codex-runtime`,
       status: realtime.status,
-      time: realtime.time
+      time: realtime.time,
+      sessionId: latestCodexEvent?.sessionId || "",
+      workspace: latestCodexEvent?.workspace || CODEX_THREAD_CWD || ""
     };
   } catch {
     return null;
@@ -567,6 +659,148 @@ function formatQuotaLabel(primaryUsed, secondaryUsed) {
   return parts.length ? parts.join(" ") : "--";
 }
 
+function usageSummary({
+  today,
+  context,
+  quota,
+  todayLabel,
+  todayHint,
+  contextLabel,
+  contextHint,
+  quotaLabel,
+  quotaHint,
+  quotaStyle
+}) {
+  return {
+    today,
+    today_label: todayLabel,
+    today_hint: todayHint,
+    context,
+    context_label: contextLabel,
+    context_hint: contextHint,
+    quota,
+    quota_label: quotaLabel,
+    quota_hint: quotaHint,
+    quota_style: quotaStyle
+  };
+}
+
+function buildLocalActivityUsage(current) {
+  const base = usageSummary({
+    today: "--",
+    context: "0 calls",
+    quota: "--",
+    todayLabel: "SESS",
+    todayHint: "Elapsed active time",
+    contextLabel: "TOOLS",
+    contextHint: "Tool starts in this session",
+    quotaLabel: "ATTN",
+    quotaHint: "User approval / attention state",
+    quotaStyle: "text"
+  });
+  if (!current?.source) {
+    return base;
+  }
+
+  const matches = eventsForCurrentScope(current);
+  const oldestMs = oldestScopeTimestamp(matches);
+  if (oldestMs > 0) {
+    base.today = formatElapsed(Date.now() - oldestMs);
+  }
+
+  const toolStarts = matches.filter(isToolStartEvent).length;
+  base.context = formatToolCount(toolStarts);
+  base.quota = attentionStateLabel(current, matches);
+  return base;
+}
+
+function eventsForCurrentScope(current) {
+  const currentFamily = sourceFamily(current?.source);
+  return recentEvents.filter((event) => {
+    if (sourceFamily(event.source) !== currentFamily) return false;
+    if (current.source && event.source && event.source !== current.source) return false;
+    if (!scopeIdentityMatches(current, event)) return false;
+    if (current.task) return event.task === current.task;
+    return true;
+  });
+}
+
+function scopeIdentityMatches(current, item) {
+  const currentHasStrongIdentity = Boolean(current?.sessionId || current?.workspace);
+  const itemHasStrongIdentity = Boolean(item?.sessionId || item?.workspace);
+
+  if (current?.sessionId && item?.sessionId && current.sessionId !== item.sessionId) {
+    return false;
+  }
+  if (current?.workspace && item?.workspace && current.workspace !== item.workspace) {
+    return false;
+  }
+  if (current?.sessionId && item?.sessionId) return true;
+  if (current?.workspace && item?.workspace) return true;
+  if (currentHasStrongIdentity && itemHasStrongIdentity) return false;
+  return true;
+}
+
+function oldestScopeTimestamp(events) {
+  let oldest = 0;
+  for (const event of events) {
+    const time = Date.parse(event.time || "");
+    if (!Number.isFinite(time) || time <= 0) continue;
+    if (!oldest || time < oldest) oldest = time;
+  }
+  return oldest;
+}
+
+function isToolStartEvent(event) {
+  const type = String(event?.type || "").toLowerCase();
+  if (type === "pretooluse" || type === "pre_tool_call" || type === "before_tool_call") {
+    return true;
+  }
+  return false;
+}
+
+function formatToolCount(count) {
+  return `${count} ${count === 1 ? "call" : "calls"}`;
+}
+
+function attentionStateLabel(current, matches) {
+  if (String(current?.status || "") === "needs-attention") {
+    return "WAITING";
+  }
+  if (["error", "failed", "fail", "blocked"].includes(String(current?.status || ""))) {
+    return "CHECK";
+  }
+
+  const unread = unreadNotifications().some((notification) => notificationMatchesScope(notification, current, matches));
+  return unread ? "WAITING" : "CLEAR";
+}
+
+function notificationMatchesScope(notification, current, matches) {
+  if (sourceFamily(notification?.source) !== sourceFamily(current?.source)) return false;
+  if (current?.source && notification?.source && notification.source !== current.source) return false;
+  if (!scopeIdentityMatches(current, notification)) return false;
+  if (current?.task) return notification.task === current.task;
+  if (matches.length && notification?.task) {
+    return matches.some((event) => event.task && event.task === notification.task);
+  }
+  return true;
+}
+
+function formatElapsed(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "--";
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
+}
+
 function sqlEscape(value) {
   return String(value || "").replace(/'/g, "''");
 }
@@ -631,6 +865,7 @@ function sourceFamily(source) {
   const text = String(source || "").toLowerCase();
   if (text.includes("claude")) return "claude";
   if (text.includes("codex")) return "codex";
+  if (text.includes("hermes")) return "hermes";
   if (text.includes("openclaw")) return "openclaw";
   return "";
 }

@@ -121,6 +121,15 @@ test("pickCurrentState falls back to event when realtime is older", () => {
   assert.equal(result?.status, "completed", "event wins when fresher");
 });
 
+test("pickCurrentState keeps a non-codex source active even if codex realtime is newer", () => {
+  const event = { source: "hermes", task: "review docs", status: "thinking", time: "2026-06-08T10:00:00.000Z" };
+  const realtime = { source: "laptop-codex", task: "runtime", status: "tool-use", time: "2026-06-08T10:00:05.000Z" };
+
+  const result = pickCurrentState(event, realtime);
+  assert.equal(result?.source, "hermes");
+  assert.equal(result?.status, "thinking");
+});
+
 test("pickCurrentState returns event when realtime is null", () => {
   const event = { source: "laptop-codex", task: "runtime", status: "running", time: "2026-06-08T10:00:00.000Z" };
 

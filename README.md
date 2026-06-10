@@ -10,7 +10,7 @@ This project turns the 4.2" monochrome reflective RLCD board into a low-power de
 - battery percentage and voltage
 - onboard temperature and humidity
 - token, context, 5-hour, and weekly usage cards
-- a compact pet companion with state bubbles
+- a compact RLCD-adapted GUGUGAGA pixel pet with state bubbles
 
 ## Repo layout
 
@@ -75,5 +75,8 @@ This repo includes or derives from several MIT-licensed upstream components:
 - `bridge/codex-pet-bridge` is based on the `codex-pet-bridge` project
 - `firmware/agent_pet_display/lib/SensorLib` is from Lewis He
 - the RLCD board support and wiring were adapted from Waveshare examples
+- the GUGUGAGA pet artwork was converted to a monochrome RLCD bitmap from
+  [`drlrf/cc-guga`](https://github.com/drlrf/cc-guga), which publishes the
+  `pets/gugugaga` package under the MIT License
 
 See the preserved license files inside those directories for details.

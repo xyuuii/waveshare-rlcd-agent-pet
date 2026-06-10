@@ -66,8 +66,10 @@ export function inferCodexRealtimeStateFromLine(line) {
 export function pickCurrentState(eventCurrent, codexRealtime) {
   const realtimeTime = Date.parse(codexRealtime?.time || 0);
   const eventTime = Date.parse(eventCurrent?.time || 0);
+  const eventFamily = sourceFamily(eventCurrent?.source);
+  const realtimeFamily = sourceFamily(codexRealtime?.source);
 
-  if (codexRealtime && realtimeTime >= eventTime) {
+  if (codexRealtime && (!eventFamily || eventFamily === realtimeFamily) && realtimeTime >= eventTime) {
     return codexRealtime;
   }
 
@@ -81,4 +83,13 @@ export function pickCurrentState(eventCurrent, codexRealtime) {
   }
 
   return null;
+}
+
+function sourceFamily(source) {
+  const text = String(source || "").toLowerCase();
+  if (text.includes("codex")) return "codex";
+  if (text.includes("claude")) return "claude";
+  if (text.includes("hermes")) return "hermes";
+  if (text.includes("openclaw")) return "openclaw";
+  return "";
 }

@@ -275,6 +275,64 @@ curl -sS http://127.0.0.1:17366/events \
   }'
 ```
 
+## Hermes 接入
+
+Hermes 已经有官方 shell hook。`pet-hermes-hook` 只是一个很薄的观察型 adapter，把 Hermes hook 事件翻译成 bridge 事件，不需要 patch Hermes 本体。
+
+把下面这些 hook 加到 `~/.hermes/config.yaml`：
+
+```yaml
+hooks:
+  pre_llm_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  pre_tool_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  post_tool_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  post_llm_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  pre_approval_request:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  post_approval_response:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+```
+
+推荐映射策略：
+
+- `pre_llm_call` -> `thinking`
+- `pre_tool_call` -> `searching` 或 `tool-use`
+- `post_tool_call` -> 回到 `thinking`
+- `pre_approval_request` -> `needs-attention`
+- `post_llm_call` -> `completed`
+
+这个 hook 保持观察型；发送失败会进队列，Hermes 自己不会被阻塞。
+
+如果 Hermes Desktop 或 gateway 路径没有触发 shell hook，可以让 `pet-agent-sync --watch` 常驻作为兜底。它会读取 `~/.hermes/logs/agent.log`，识别 `conversation turn` 和 `Turn ended` 记录，然后带着上游 session id 发出稳定的 `hermes` 槽位。这个兜底比 hook 粗一些：可以可靠显示 `thinking` 和 `completed`，但 `searching`、`tool-use` 这类工具级状态仍然需要 hook。
+
+```bash
+PET_AGENT_SYNC_HERMES_LOG="$HOME/.hermes/logs/agent.log" pet-agent-sync --watch
+```
+
+## OpenClaw 接入
+
+OpenClaw 最适合走官方 plugin hook。仓库里已经带了一个轻量插件：`integrations/openclaw-pet-bridge/`。
+
+建议接法：
+
+1. 把 `integrations/openclaw-pet-bridge` 复制或软链到 `~/.openclaw/extensions/openclaw-pet-bridge`
+2. 在 OpenClaw 配置里 allow 这个 plugin
+3. 在 `plugins.entries.openclaw-pet-bridge.config.bridgeUrl` 里填 bridge URL，或者直接导出 `PET_BRIDGE_URL`
+
+插件会发这些状态：
+
+- `before_agent_start` -> `thinking`
+- `before_tool_call` -> `searching` 或 `tool-use`
+- `after_tool_call` -> 回到 `thinking`
+- `after_tool_call` 如果结果是 approval pending -> `needs-attention`
+- `agent_end` -> `completed` 或 `error`
+
+如果你的 bridge 监听在非 loopback 地址上，记得给 OpenClaw 进程导出 `PET_BRIDGE_TOKEN`。
+
 ## 桌面宠物接入
 
 订阅 SSE：

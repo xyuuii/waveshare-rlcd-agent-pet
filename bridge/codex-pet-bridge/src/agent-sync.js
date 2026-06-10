@@ -5,12 +5,17 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildHermesLogSyncNotifications } from "./hermes-log-channel.js";
+import { readHermesLogActivity } from "./hermes-log-sync.js";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NOTIFY_CLIENT = resolve(HERE, "notify-client.js");
 const STATE_PATH = resolve(process.env.PET_AGENT_SYNC_STATE || join(homedir(), ".codex-pet-bridge", "agent-sync-state.json"));
 const CODEX_SESSIONS_DIR = resolve(process.env.CODEX_SESSIONS_DIR || join(homedir(), ".codex", "sessions"));
+const HERMES_LOG_PATH = resolve(process.env.PET_AGENT_SYNC_HERMES_LOG || join(homedir(), ".hermes", "logs", "agent.log"));
 const SOURCE_PREFIX = process.env.PET_AGENT_SYNC_PREFIX || "local";
 const ACTIVE_WINDOW_MS = numberFromEnv("PET_AGENT_SYNC_ACTIVE_WINDOW_MS", 45000);
+const HERMES_COMPLETED_WINDOW_MS = numberFromEnv("PET_AGENT_SYNC_HERMES_COMPLETED_WINDOW_MS", 30 * 60 * 1000);
 const REFRESH_MS = numberFromEnv("PET_AGENT_SYNC_REFRESH_MS", 90000);
 const WATCH_INTERVAL_MS = numberFromEnv("PET_AGENT_SYNC_INTERVAL_MS", 15000);
 
@@ -45,6 +50,7 @@ async function tick() {
     runningMessage: `${SOURCE_PREFIX} Claude Code is working`,
     doneMessage: `${SOURCE_PREFIX} Claude Code response stopped`
   });
+  await updateHermesLogChannel(state);
   notify(["--flush"]);
   state.updatedAt = new Date().toISOString();
   await saveState(state);
@@ -77,6 +83,19 @@ async function updateChannel(state, options) {
     ]);
     state[`${options.key}Active`] = false;
     state[`${options.key}LastRunningNotify`] = 0;
+  }
+}
+
+async function updateHermesLogChannel(state) {
+  const activity = readHermesLogActivity(HERMES_LOG_PATH, {
+    activeWindowMs: ACTIVE_WINDOW_MS,
+    completedWindowMs: HERMES_COMPLETED_WINDOW_MS
+  });
+  const { notifications } = buildHermesLogSyncNotifications(state, activity, {
+    refreshMs: REFRESH_MS
+  });
+  for (const args of notifications) {
+    notify(args);
   }
 }
 
@@ -224,6 +243,7 @@ Environment:
   PET_AGENT_SYNC_PREFIX=laptop
   PET_BRIDGE_URL=http://127.0.0.1:17366/events
   CODEX_SESSIONS_DIR=~/.codex/sessions
+  PET_AGENT_SYNC_HERMES_LOG=~/.hermes/logs/agent.log
   PET_AGENT_SYNC_INTERVAL_MS=15000
 `);
 }

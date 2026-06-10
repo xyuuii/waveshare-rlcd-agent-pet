@@ -141,6 +141,45 @@ void test_tool_use_status_keeps_detail_label(void) {
   TEST_ASSERT_EQUAL_STRING("tool-use", state.statusDetail.c_str());
 }
 
+void test_blocked_status_stays_attention_with_matching_detail(void) {
+  const char* json =
+      "{\"ok\":true,\"unread_count\":0,\"source\":\"hermes\",\"task\":\"review output\","
+      "\"updated_at\":\"2026-06-09T15:16:00Z\",\"current_status\":\"blocked\"}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(static_cast<int>(AgentStatus::NeedsAttention), static_cast<int>(state.status));
+  TEST_ASSERT_EQUAL_STRING("needs-attention", state.statusDetail.c_str());
+}
+
+void test_tool_calling_status_maps_to_running_working(void) {
+  const char* json =
+      "{\"ok\":true,\"unread_count\":0,\"source\":\"codex\",\"task\":\"call tool\","
+      "\"updated_at\":\"2026-06-09T15:17:00Z\",\"current_status\":\"tool-calling\"}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(static_cast<int>(AgentStatus::Running), static_cast<int>(state.status));
+  TEST_ASSERT_EQUAL_STRING("working", state.statusDetail.c_str());
+}
+
+void test_awaiting_tool_status_maps_to_running_working(void) {
+  const char* json =
+      "{\"ok\":true,\"unread_count\":0,\"source\":\"codex\",\"task\":\"wait tool\","
+      "\"updated_at\":\"2026-06-09T15:18:00Z\",\"current_status\":\"awaiting_tool\"}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(static_cast<int>(AgentStatus::Running), static_cast<int>(state.status));
+  TEST_ASSERT_EQUAL_STRING("working", state.statusDetail.c_str());
+}
+
 void test_legacy_direct_event_payload_still_parses(void) {
   const char* json =
       "{\"source\":\"hermes\",\"status\":\"completed\",\"task\":\"final review\","
@@ -153,6 +192,138 @@ void test_legacy_direct_event_payload_still_parses(void) {
   TEST_ASSERT_EQUAL(static_cast<int>(SourceKind::Hermes), static_cast<int>(state.source));
   TEST_ASSERT_EQUAL(static_cast<int>(AgentStatus::Completed), static_cast<int>(state.status));
   TEST_ASSERT_EQUAL_STRING("final review", state.task.c_str());
+}
+
+void test_openclaw_payload_maps_to_openclaw_source(void) {
+  const char* json =
+      "{\"ok\":true,\"unread_count\":0,\"source\":\"openclaw\",\"task\":\"watch hooks\","
+      "\"updated_at\":\"2026-06-09T09:30:00Z\",\"current_status\":\"tool-use\"}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(static_cast<int>(SourceKind::OpenClaw), static_cast<int>(state.source));
+  TEST_ASSERT_EQUAL(static_cast<int>(AgentStatus::Running), static_cast<int>(state.status));
+  TEST_ASSERT_EQUAL_STRING("tool-use", state.statusDetail.c_str());
+}
+
+void test_non_ascii_task_falls_back_to_source_session_label(void) {
+  const char* json =
+      "{\"ok\":true,\"unread_count\":0,\"source\":\"hermes\",\"task\":\"你好\","
+      "\"updated_at\":\"2026-06-10T09:56:16Z\",\"current_status\":\"completed\","
+      "\"agents\":["
+      "{\"id\":\"slot_a\",\"source\":\"codex\",\"task\":\"mac-codex-runtime\",\"status\":\"running\"},"
+      "{\"id\":\"slot_b\",\"source\":\"hermes\",\"task\":\"你好\",\"status\":\"completed\"}"
+      "]}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL_STRING("HERMES SESSION", state.task.c_str());
+  TEST_ASSERT_EQUAL_STRING("mac-codex-runtime", state.agentSlots[0].task.c_str());
+  TEST_ASSERT_EQUAL_STRING("HERMES SESSION", state.agentSlots[1].task.c_str());
+}
+
+void test_generic_usage_metadata_is_parsed_for_non_codex_agents(void) {
+  const char* json =
+      "{\"ok\":true,\"unread_count\":0,\"source\":\"hermes\",\"task\":\"pet review\","
+      "\"updated_at\":\"2026-06-09T09:30:00Z\",\"current_status\":\"thinking\","
+      "\"usage\":{\"today\":\"1m 05s\",\"context\":\"1 call\",\"quota\":\"CLEAR\","
+      "\"today_label\":\"SESS\",\"today_hint\":\"Elapsed active time\","
+      "\"context_label\":\"TOOLS\",\"context_hint\":\"Tool starts in this session\","
+      "\"quota_label\":\"ATTN\",\"quota_hint\":\"User approval / attention state\","
+      "\"quota_style\":\"text\"}}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL_STRING("SESS", state.usageTodayLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("1m 05s", state.usageToday.c_str());
+  TEST_ASSERT_EQUAL_STRING("Elapsed active time", state.usageTodayHint.c_str());
+  TEST_ASSERT_EQUAL_STRING("TOOLS", state.usageContextLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("1 call", state.usageContext.c_str());
+  TEST_ASSERT_EQUAL_STRING("ATTN", state.usageQuotaLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("CLEAR", state.usageQuota.c_str());
+  TEST_ASSERT_EQUAL_STRING("text", state.usageQuotaStyle.c_str());
+}
+
+void test_parse_focus_metadata_and_agent_slots(void) {
+  const char* json =
+      "{\"ok\":true,\"source\":\"codex\",\"current_status\":\"thinking\","
+      "\"focus_mode\":\"pinned\",\"focus_id\":\"slot_codex_b\",\"focus_index\":1,\"focus_count\":8,"
+      "\"agents\":["
+      "{\"id\":\"slot_codex_a\",\"source\":\"codex\",\"task\":\"task a\",\"status\":\"thinking\",\"updated_at\":\"2026-06-09T10:00:00Z\"},"
+      "{\"id\":\"slot_codex_b\",\"source\":\"hermes\",\"task\":\"task b\",\"status\":\"needs-attention\",\"updated_at\":\"2026-06-09T10:00:05Z\"},"
+      "{\"id\":\"slot_codex_c\",\"source\":\"openclaw\",\"task\":\"task c\",\"status\":\"completed\",\"updated_at\":\"2026-06-09T10:00:10Z\"},"
+      "{\"id\":\"slot_codex_d\",\"source\":\"claude-code\",\"task\":\"task d\",\"status\":\"error\",\"updated_at\":\"2026-06-09T10:00:15Z\"},"
+      "{\"id\":\"slot_codex_e\",\"source\":\"codex\",\"task\":\"task e\",\"status\":\"running\",\"updated_at\":\"2026-06-09T10:00:20Z\"},"
+      "{\"id\":\"slot_codex_f\",\"source\":\"hermes\",\"task\":\"task f\",\"status\":\"started\",\"updated_at\":\"2026-06-09T10:00:25Z\"},"
+      "{\"id\":\"slot_codex_g\",\"source\":\"codex\",\"task\":\"task g\",\"status\":\"searching\",\"updated_at\":\"2026-06-09T10:00:30Z\"},"
+      "{\"id\":\"slot_codex_h\",\"source\":\"hermes\",\"task\":\"task h\",\"status\":\"tool-use\",\"updated_at\":\"2026-06-09T10:00:35Z\"}"
+      "]}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(static_cast<int>(FocusMode::Pinned), static_cast<int>(state.focusMode));
+  TEST_ASSERT_EQUAL_STRING("slot_codex_b", state.focusId.c_str());
+  TEST_ASSERT_EQUAL(1, state.focusIndex);
+  TEST_ASSERT_EQUAL(kMaxAgentSlots, state.focusCount);
+  TEST_ASSERT_TRUE(state.agentSlots[0].present);
+  TEST_ASSERT_EQUAL_STRING("slot_codex_a", state.agentSlots[0].id.c_str());
+  TEST_ASSERT_EQUAL_STRING("task b", state.agentSlots[1].task.c_str());
+  TEST_ASSERT_EQUAL(static_cast<int>(SourceKind::Hermes), static_cast<int>(state.agentSlots[1].source));
+  TEST_ASSERT_EQUAL(static_cast<int>(AgentStatus::NeedsAttention),
+                    static_cast<int>(state.agentSlots[1].status));
+  TEST_ASSERT_TRUE(state.agentSlots[kMaxAgentSlots - 1].present);
+  TEST_ASSERT_EQUAL_STRING("slot_codex_f", state.agentSlots[kMaxAgentSlots - 1].id.c_str());
+}
+
+void test_out_of_window_pinned_focus_falls_back_to_auto_metadata(void) {
+  const char* json =
+      "{\"ok\":true,\"source\":\"codex\",\"current_status\":\"thinking\","
+      "\"focus_mode\":\"pinned\",\"focus_id\":\"slot_codex_h\",\"focus_index\":7,\"focus_count\":8,"
+      "\"agents\":["
+      "{\"id\":\"slot_codex_a\",\"source\":\"codex\",\"task\":\"task a\",\"status\":\"thinking\",\"updated_at\":\"2026-06-09T10:00:00Z\"},"
+      "{\"id\":\"slot_codex_b\",\"source\":\"hermes\",\"task\":\"task b\",\"status\":\"needs-attention\",\"updated_at\":\"2026-06-09T10:00:05Z\"},"
+      "{\"id\":\"slot_codex_c\",\"source\":\"openclaw\",\"task\":\"task c\",\"status\":\"completed\",\"updated_at\":\"2026-06-09T10:00:10Z\"},"
+      "{\"id\":\"slot_codex_d\",\"source\":\"claude-code\",\"task\":\"task d\",\"status\":\"error\",\"updated_at\":\"2026-06-09T10:00:15Z\"},"
+      "{\"id\":\"slot_codex_e\",\"source\":\"codex\",\"task\":\"task e\",\"status\":\"running\",\"updated_at\":\"2026-06-09T10:00:20Z\"},"
+      "{\"id\":\"slot_codex_f\",\"source\":\"hermes\",\"task\":\"task f\",\"status\":\"started\",\"updated_at\":\"2026-06-09T10:00:25Z\"},"
+      "{\"id\":\"slot_codex_g\",\"source\":\"codex\",\"task\":\"task g\",\"status\":\"searching\",\"updated_at\":\"2026-06-09T10:00:30Z\"},"
+      "{\"id\":\"slot_codex_h\",\"source\":\"hermes\",\"task\":\"task h\",\"status\":\"tool-use\",\"updated_at\":\"2026-06-09T10:00:35Z\"}"
+      "]}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(static_cast<int>(FocusMode::Auto), static_cast<int>(state.focusMode));
+  TEST_ASSERT_EQUAL_STRING("", state.focusId.c_str());
+  TEST_ASSERT_EQUAL(-1, state.focusIndex);
+  TEST_ASSERT_EQUAL(kMaxAgentSlots, state.focusCount);
+}
+
+void test_negative_pinned_focus_index_falls_back_to_auto_metadata(void) {
+  const char* json =
+      "{\"ok\":true,\"source\":\"codex\",\"current_status\":\"thinking\","
+      "\"focus_mode\":\"pinned\",\"focus_id\":\"slot_codex_a\",\"focus_index\":-2,\"focus_count\":1,"
+      "\"agents\":["
+      "{\"id\":\"slot_codex_a\",\"source\":\"codex\",\"task\":\"task a\",\"status\":\"thinking\",\"updated_at\":\"2026-06-09T10:00:00Z\"}"
+      "]}";
+  AgentState state{};
+
+  const bool ok = parseAgentStatePayload(json, state);
+
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(static_cast<int>(FocusMode::Auto), static_cast<int>(state.focusMode));
+  TEST_ASSERT_EQUAL_STRING("", state.focusId.c_str());
+  TEST_ASSERT_EQUAL(-1, state.focusIndex);
+  TEST_ASSERT_EQUAL(1, state.focusCount);
 }
 
 void test_invalid_json_returns_false(void) {
@@ -174,7 +345,16 @@ int main(void) {
   RUN_TEST(test_compact_status_without_notification_still_maps_status);
   RUN_TEST(test_searching_status_keeps_detail_label);
   RUN_TEST(test_tool_use_status_keeps_detail_label);
+  RUN_TEST(test_blocked_status_stays_attention_with_matching_detail);
+  RUN_TEST(test_tool_calling_status_maps_to_running_working);
+  RUN_TEST(test_awaiting_tool_status_maps_to_running_working);
   RUN_TEST(test_legacy_direct_event_payload_still_parses);
+  RUN_TEST(test_openclaw_payload_maps_to_openclaw_source);
+  RUN_TEST(test_non_ascii_task_falls_back_to_source_session_label);
+  RUN_TEST(test_generic_usage_metadata_is_parsed_for_non_codex_agents);
+  RUN_TEST(test_parse_focus_metadata_and_agent_slots);
+  RUN_TEST(test_out_of_window_pinned_focus_falls_back_to_auto_metadata);
+  RUN_TEST(test_negative_pinned_focus_index_falls_back_to_auto_metadata);
   RUN_TEST(test_invalid_json_returns_false);
   return UNITY_END();
 }

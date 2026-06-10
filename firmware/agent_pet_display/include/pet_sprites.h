@@ -4,9 +4,12 @@
 
 #include "models.h"
 
-struct PetSpriteFrame {
-  const char* lines[5];
+struct PetBitmapFrame {
+  uint8_t width;
+  uint8_t height;
+  const char* bits;
 };
 
-const PetSpriteFrame& spriteForMode(PetMode mode, uint32_t tickMs);
+bool petBitmapPixel(const PetBitmapFrame& frame, uint8_t x, uint8_t y);
+const PetBitmapFrame& bitmapForMode(PetMode mode, uint32_t tickMs);
 const char* activePetSpecies();

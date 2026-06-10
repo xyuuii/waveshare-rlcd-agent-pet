@@ -12,7 +12,12 @@ void test_default_agent_state_is_unknown_idle_and_disconnected(void) {
 
   TEST_ASSERT_EQUAL(static_cast<int>(SourceKind::Unknown), static_cast<int>(state.source));
   TEST_ASSERT_EQUAL(static_cast<int>(AgentStatus::Idle), static_cast<int>(state.status));
+  TEST_ASSERT_EQUAL(static_cast<int>(FocusMode::Auto), static_cast<int>(state.focusMode));
   TEST_ASSERT_EQUAL_STRING("idle", state.statusDetail.c_str());
+  TEST_ASSERT_EQUAL_STRING("", state.focusId.c_str());
+  TEST_ASSERT_EQUAL(-1, state.focusIndex);
+  TEST_ASSERT_EQUAL(0, state.focusCount);
+  TEST_ASSERT_FALSE(state.agentSlots[0].present);
   TEST_ASSERT_FALSE(state.connected);
 }
 
@@ -45,10 +50,19 @@ void test_display_state_defaults_include_layout_placeholders(void) {
   TEST_ASSERT_EQUAL_STRING("--", view.sidebarClimate.c_str());
   TEST_ASSERT_EQUAL_STRING("--", view.sidebarAgent.c_str());
   TEST_ASSERT_EQUAL_STRING("--", view.sidebarTokens.c_str());
+  TEST_ASSERT_EQUAL_STRING("TODAY", view.sidebarTokensLabel.c_str());
   TEST_ASSERT_EQUAL_STRING("--", view.sidebarContext.c_str());
+  TEST_ASSERT_EQUAL_STRING("CONTEXT", view.sidebarContextLabel.c_str());
   TEST_ASSERT_EQUAL_STRING("--", view.sidebarQuota.c_str());
+  TEST_ASSERT_EQUAL_STRING("QUOTA", view.sidebarQuotaLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("quota", view.sidebarQuotaStyle.c_str());
+  TEST_ASSERT_EQUAL_STRING("AUTO", view.focusLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("BOOT page  HOLD/KEY agent", view.focusHint.c_str());
   TEST_ASSERT_EQUAL_STRING("...", view.buddyBubble.c_str());
   TEST_ASSERT_EQUAL_STRING("--", view.footerMessage.c_str());
+  TEST_ASSERT_EQUAL_STRING("WIFI --", view.linkLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("WIFI --", view.networkLine.c_str());
+  TEST_ASSERT_EQUAL_STRING("BRIDGE --", view.bridgeLine.c_str());
 }
 
 void test_next_screen_page_cycles_between_overview_and_usage(void) {

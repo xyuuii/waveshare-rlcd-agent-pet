@@ -29,6 +29,7 @@
   "bin": {
     "pet-bridge": "./src/bridge-server.js",
     "pet-claude-hook": "./src/claude-hook.js",
+    "pet-hermes-hook": "./src/hermes-hook.js",
     "pet-mcp-server": "./src/mcp-server.js",
     "pet-notify": "./src/notify-client.js",
     "pet-agent-sync": "./src/agent-sync.js"
@@ -36,6 +37,7 @@
   "scripts": {
     "start": "node ./src/bridge-server.js",
     "hook": "node ./src/claude-hook.js",
+    "hermes-hook": "node ./src/hermes-hook.js",
     "mcp": "node ./src/mcp-server.js",
     "notify": "node ./src/notify-client.js",
     "sync:tick": "node ./src/agent-sync.js --tick",

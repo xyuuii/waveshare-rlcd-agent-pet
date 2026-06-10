@@ -275,6 +275,64 @@ curl -sS http://127.0.0.1:17366/events \
   }'
 ```
 
+## Hermes
+
+Hermes already has an official shell-hook surface. `pet-hermes-hook` is a thin observer that maps Hermes hook events into bridge events without patching Hermes itself.
+
+Add these hooks to `~/.hermes/config.yaml`:
+
+```yaml
+hooks:
+  pre_llm_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  pre_tool_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  post_tool_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  post_llm_call:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  pre_approval_request:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+  post_approval_response:
+    - command: "node /ABS/PATH/TO/src/hermes-hook.js"
+```
+
+Recommended behavior:
+
+- `pre_llm_call` -> `thinking`
+- `pre_tool_call` -> `searching` or `tool-use`
+- `post_tool_call` -> back to `thinking`
+- `pre_approval_request` -> `needs-attention`
+- `post_llm_call` -> `completed`
+
+The hook stays observational: send failures are queued and Hermes continues running normally.
+
+For Hermes Desktop or gateway paths that do not fire shell hooks, keep `pet-agent-sync --watch` running as a fallback. It tails `~/.hermes/logs/agent.log`, detects `conversation turn` and `Turn ended` records, then emits a stable `hermes` slot with the upstream session id. This is intentionally less detailed than hooks: it can reliably show `thinking` and `completed`, while tool-level states such as `searching` and `tool-use` still require hooks.
+
+```bash
+PET_AGENT_SYNC_HERMES_LOG="$HOME/.hermes/logs/agent.log" pet-agent-sync --watch
+```
+
+## OpenClaw
+
+OpenClaw's official plugin hooks are the best fit for live status. This repo ships a small plugin under `integrations/openclaw-pet-bridge/`.
+
+Suggested install flow:
+
+1. Copy or symlink `integrations/openclaw-pet-bridge` into `~/.openclaw/extensions/openclaw-pet-bridge`.
+2. Allow that plugin in your OpenClaw config.
+3. Set `plugins.entries.openclaw-pet-bridge.config.bridgeUrl` to your bridge URL, or export `PET_BRIDGE_URL`.
+
+The plugin emits:
+
+- `before_agent_start` -> `thinking`
+- `before_tool_call` -> `searching` or `tool-use`
+- `after_tool_call` -> back to `thinking`
+- `after_tool_call` with approval-pending results -> `needs-attention`
+- `agent_end` -> `completed` or `error`
+
+If your bridge listens on a non-loopback address, export `PET_BRIDGE_TOKEN` for the plugin process so it can authenticate.
+
 ## Desktop Pet UI
 
 Subscribe to the SSE stream:

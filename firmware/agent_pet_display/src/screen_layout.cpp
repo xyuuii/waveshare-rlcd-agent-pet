@@ -2,17 +2,17 @@
 
 namespace {
 
-constexpr ScreenRect kOverviewPetPanel{278, 176, 112, 96};
+constexpr ScreenRect kOverviewPetPanel{278, 178, 110, 90};
 constexpr ScreenRect kOverviewRightInfoCards[2]{
-    {278, 30, 112, 68},
-    {278, 106, 112, 62},
+    {278, 32, 110, 56},
+    {278, 98, 110, 68},
 };
-constexpr ScreenRect kOverviewTimeCard{12, 30, 258, 70};
-constexpr ScreenRect kOverviewStatusCard{12, 108, 258, 68};
+constexpr ScreenRect kOverviewTimeCard{12, 32, 256, 54};
+constexpr ScreenRect kOverviewStatusCard{12, 94, 256, 72};
 constexpr ScreenRect kOverviewMetricCards[3]{
-    {12, 184, 250, 24},
-    {12, 212, 250, 24},
-    {12, 240, 250, 28},
+    {12, 178, 256, 26},
+    {12, 211, 256, 26},
+    {12, 242, 256, 28},
 };
 
 }  // namespace
@@ -52,7 +52,7 @@ ScreenRect overviewMetricCardRect(int index) {
 QuotaBarLayout overviewQuotaBarLayout() {
   const ScreenRect card = overviewMetricCardRect(2);
   return QuotaBarLayout{
-      {card.x + 58, card.y + 14, card.w - 66, 4},
-      {card.x + 58, card.y + 21, card.w - 66, 4},
+      {card.x + 98, card.y + 13, card.w - 106, 4},
+      {card.x + 98, card.y + 22, card.w - 106, 4},
   };
 }

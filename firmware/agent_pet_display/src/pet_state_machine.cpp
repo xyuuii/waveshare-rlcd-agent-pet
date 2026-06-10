@@ -4,12 +4,16 @@
 
 namespace {
 
+constexpr const char* kFocusHint = "BOOT page  HOLD/KEY agent";
+
 const char* sourceLabel(SourceKind source) {
   switch (source) {
     case SourceKind::Codex:
       return "CODEX";
     case SourceKind::Hermes:
       return "HERMES";
+    case SourceKind::OpenClaw:
+      return "OPENCLAW";
     case SourceKind::ClaudeCode:
       return "CLAUDE";
     default:
@@ -174,12 +178,79 @@ std::string tickerText(const std::string& statusDetail, const std::string& task,
   return statusDetail;
 }
 
+std::string focusLabelText(const AgentState& agent) {
+  if (agent.focusMode == FocusMode::Pinned && agent.focusCount > 0 &&
+      agent.focusIndex >= 0 && agent.focusIndex < agent.focusCount) {
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "PIN %d/%d", agent.focusIndex + 1, agent.focusCount);
+    return buffer;
+  }
+  return "AUTO";
+}
+
+std::string wifiLinkLabel(const NetworkState& network) {
+  if (!network.wifiKnown) {
+    return "WIFI --";
+  }
+  if (network.wifiConnected) {
+    if (network.rssi < 0) {
+      char buffer[16];
+      snprintf(buffer, sizeof(buffer), "WIFI %d", network.rssi);
+      return buffer;
+    }
+    return "WIFI OK";
+  }
+  return network.wifiConnecting ? "WIFI TRY" : "WIFI OFF";
+}
+
+std::string networkLineText(const NetworkState& network) {
+  if (!network.wifiKnown) {
+    return "WIFI --";
+  }
+  if (network.wifiConnected) {
+    if (network.rssi < 0) {
+      char buffer[18];
+      snprintf(buffer, sizeof(buffer), "WIFI %ddBm", network.rssi);
+      return buffer;
+    }
+    return "WIFI OK";
+  }
+  char buffer[18];
+  snprintf(buffer,
+           sizeof(buffer),
+           "%s %lu",
+           network.wifiConnecting ? "WIFI TRY" : "WIFI OFF",
+           static_cast<unsigned long>(network.reconnectAttempts));
+  return buffer;
+}
+
+std::string bridgeLineText(const AgentState& agent, const NetworkState& network) {
+  if (agent.connected) {
+    return "BRIDGE OK";
+  }
+  if (network.wifiKnown && !network.wifiConnected) {
+    return "BRIDGE WAIT";
+  }
+  return "BRIDGE OFF";
+}
+
+std::string offlineFooterText(const NetworkState& network) {
+  if (network.wifiKnown && !network.wifiConnected) {
+    return network.wifiConnecting ? "WiFi reconnecting" : "WiFi offline";
+  }
+  if (network.wifiConnected) {
+    return "Bridge offline; WiFi OK";
+  }
+  return "Bridge offline";
+}
+
 }  // namespace
 
 DisplayState deriveDisplayState(const AgentState& agent,
                                 const PowerState& power,
                                 const EnvironmentState& environment,
-                                ScreenPage page) {
+                                ScreenPage page,
+                                const NetworkState& network) {
   DisplayState view{};
   view.page = page;
   view.sourceLabel = sourceLabel(agent.source);
@@ -191,11 +262,25 @@ DisplayState deriveDisplayState(const AgentState& agent,
   view.sidebarAgent = std::string(sourceLabel(agent.source)) + " " +
                       statusDetailBadge(agent.statusDetail, agent.status);
   view.sidebarTokens = agent.usageToday.empty() ? "--" : agent.usageToday;
+  view.sidebarTokensLabel = agent.usageTodayLabel.empty() ? "TODAY" : agent.usageTodayLabel;
+  view.sidebarTokensHint = agent.usageTodayHint.empty() ? "Today total in this workspace" : agent.usageTodayHint;
   view.sidebarContext = agent.usageContext.empty() ? "--" : agent.usageContext;
+  view.sidebarContextLabel = agent.usageContextLabel.empty() ? "CONTEXT" : agent.usageContextLabel;
+  view.sidebarContextHint =
+      agent.usageContextHint.empty() ? "Current turn tokens / model window" : agent.usageContextHint;
   view.sidebarQuota = agent.usageQuota.empty() ? "--" : agent.usageQuota;
+  view.sidebarQuotaLabel = agent.usageQuotaLabel.empty() ? "QUOTA" : agent.usageQuotaLabel;
+  view.sidebarQuotaHint =
+      agent.usageQuotaHint.empty() ? "Remaining 5-hour and weekly limits" : agent.usageQuotaHint;
+  view.sidebarQuotaStyle = agent.usageQuotaStyle.empty() ? "quota" : agent.usageQuotaStyle;
+  view.focusLabel = focusLabelText(agent);
+  view.focusHint = kFocusHint;
   view.buddyBubble = buddyBubbleText(agent.statusDetail, agent.status);
+  view.linkLabel = wifiLinkLabel(network);
+  view.networkLine = networkLineText(network);
+  view.bridgeLine = bridgeLineText(agent, network);
   view.footerMessage = agent.connected ? tickerText(view.statusDetail, agent.task, agent.updatedAt)
-                                       : "Bridge offline";
+                                       : offlineFooterText(network);
 
   if (environment.clockValid) {
     char timeBuffer[12];
@@ -225,25 +310,20 @@ DisplayState deriveDisplayState(const AgentState& agent,
     view.sidebarClimate = climateBuffer;
   }
 
+  if (page == ScreenPage::Usage) {
+    view.footerMessage = view.focusHint;
+  }
+
   if (!agent.connected) {
     view.petMode = PetMode::Sleep;
-    if (page == ScreenPage::Usage) {
-      view.footerMessage = "PAGE 2/2 BOOT toggle";
-    }
     return view;
   }
   if (power.lowBattery) {
     view.petMode = PetMode::Tired;
-    if (page == ScreenPage::Usage) {
-      view.footerMessage = "PAGE 2/2 BOOT toggle";
-    }
     return view;
   }
   if (power.charging) {
     view.petMode = PetMode::Charging;
-    if (page == ScreenPage::Usage) {
-      view.footerMessage = "PAGE 2/2 BOOT toggle";
-    }
     return view;
   }
 
@@ -263,10 +343,6 @@ DisplayState deriveDisplayState(const AgentState& agent,
     default:
       view.petMode = PetMode::Idle;
       break;
-  }
-
-  if (page == ScreenPage::Usage) {
-    view.footerMessage = "PAGE 2/2 BOOT toggle";
   }
 
   return view;
