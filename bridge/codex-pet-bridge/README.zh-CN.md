@@ -97,7 +97,13 @@ curl -sS http://127.0.0.1:17366/events \
 | `GET /notifications/next` | 查看下一条未读通知。 |
 | `POST /notifications/:id/ack` | 标记单条通知已读。 |
 | `POST /notifications/ack-all` | 标记全部通知已读。 |
-| `GET /esp32/poll` | 给 ESP32 / 小智设备用的紧凑轮询接口。 |
+| `GET /esp32/poll` | 给 ESP32 / 小智设备用的紧凑轮询接口；同时接收板子遥测，并下发显示设置、时区和彩蛋指令。 |
+| `GET /esp32/anim/:id/frames` | 把 RLA1 动画帧分块推给板子。 |
+| `GET /status` | 控制台和菜单栏 App 需要的全部状态：智能体、用量、板子遥测、设置、动画。 |
+| `GET` / `POST /settings` | 表盘、12/24 小时制、秒、一次性翻页、时区覆盖、默认动画。 |
+| `GET /anim`、`GET` / `PUT` / `DELETE /anim/:id` | 动画库（控制台上传的 RLA1 文件）。 |
+| `POST /egg/play`、`POST /egg/stop` | 让板子播放或停止动画。 |
+| `GET /ui/` | RLCD 控制台（静态页面，API 调用仍需要令牌）。 |
 | `GET /health` | 健康检查。 |
 
 ## 事件模型
@@ -191,6 +197,8 @@ PET_NOTIFY_THROTTLE_MS=30000 npm run start
 建议先只接 `Notification`、`UserPromptSubmit`、`Stop`。它们足够表达“思考中 / 等你处理 / 已完成”，又不会把每一次工具调用都刷到屏幕上。
 
 hook 失败时会返回退出码 `0`，不会阻塞 Claude Code 本身。发送失败会写入和 `pet-notify` 共用的有界 `PET_NOTIFY_QUEUE`，之后可由 `pet-notify --flush` 重试。
+
+如果 bridge 和 Claude Code 在同一台 Mac 上，hook 不是必需的：bridge 会读取 Claude Code 自己的会话记录（`~/.claude/projects/*/*.jsonl`，或 `$CLAUDE_CONFIG_DIR/projects`），分辨思考、调用工具、搜索和一轮结束，并给出今日 token、上下文窗口和模型。不会改动 Claude Code 的任何配置。“等你批准”这种状态仍然只有 hook 能拿到。设置 `PET_BRIDGE_CLAUDE_TRANSCRIPTS=0` 可以关闭读取。
 
 ## Claude Desktop / MCP
 
@@ -415,6 +423,21 @@ payload 形态：
 | 常驻中枢 Claude Code | `hub-claude` |
 | OpenClaw | `openclaw` |
 
+## RLCD 控制台、菜单栏 App 和彩蛋
+
+bridge 在 `http://127.0.0.1:17366/ui/` 提供一个控制台：
+
+- 每个智能体在做什么，Claude Code 还会显示当前工具、模型和上下文
+- 板子的电量、温湿度、Wi-Fi 信号、固件版本和当前页面
+- 七种时钟表盘（预览图由固件自己的绘图代码渲染），以及 12/24 小时制、秒和时区
+- 彩蛋工坊：选一个本地视频（比如你自己的 *Bad Apple!!*），在浏览器里转成 1-bit 帧，上传后在板子上播放，还可以让 Mac 同步播放视频原声
+
+视频只在浏览器里解码，送到 bridge 的只有 1-bit 的 RLA1 帧，保存在 `PET_BRIDGE_ANIM_DIR`（默认是状态文件旁边的 `anim/`）。在板子上同时按住 BOOT 和 KEY 2 秒（或单独长按 BOOT 5 秒）会播放默认动画；没有上传动画时播放内置彩蛋。
+
+`macos/PetBar` 是一个菜单栏 App，显示同样的信息，也能切换页面、表盘和播放彩蛋。用 `macos/PetBar/build.sh --install` 构建（需要 Xcode Command Line Tools）。
+
+`tools/mac/install.sh` 用来在 Mac 上安装或修复 bridge：把 bridge 复制到 `~/.codex-pet-bridge/app`，令牌放进 `~/.codex-pet-bridge/token`，重写 LaunchAgent，并把 Hermes hook 和 OpenClaw 插件指向新位置。不加 `--apply` 时只演示不改动；改动前会备份，也支持 `--rollback`。
+
 ## ESP32 / 小智轮询
 
 给简单固件或原型屏幕使用 HTTP polling：
@@ -456,6 +479,19 @@ POST http://127.0.0.1:17366/notifications/<id>/ack
 GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 ```
 
+RLCD 固件 1.3.0 起会在同一个请求里带上遥测，例如 `&fw=1.3.0&bat=84&mv=3980&temp=22.6&hum=48&rssi=-52&up=3600&page=clock&style=segment&srev=…&erev=…&heap=…&clk=1&eggreq=…`；返回里多了几个旧固件会忽略的字段：
+
+```json
+{
+  "server_time_ms": 1790671923000,
+  "display": { "rev": 1790671900, "clock_style": "segment", "hour12": false, "show_seconds": true, "page": "clock" },
+  "time": { "tz": "GMT0BST,M3.5.0/1,M10.5.0", "zone": "Europe/London" },
+  "egg": { "rev": 1790671920, "id": "badapple", "frames": 4382, "fps_x100": 2000, "width": 400, "height": 300, "start_at_ms": 1790671926500 }
+}
+```
+
+`display.page` 每个版本只下发一次；时区默认跟随 Mac（`/etc/localtime`），控制台里可以设置覆盖值。
+
 ## 安全模型
 
 这个项目面向可信本机和家庭局域网，不应该直接暴露到公网。
@@ -463,6 +499,8 @@ GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 - 默认监听 `127.0.0.1`。
 - 非 loopback 监听时，如果没有 `PET_BRIDGE_TOKEN` 会拒绝启动。
 - 支持 `Authorization: Bearer <token>`、`x-pet-bridge-token` 或 `?token=...`。
+- 令牌来自 `PET_BRIDGE_TOKEN`，或 `PET_BRIDGE_TOKEN_FILE` 指向的文件。hook、`pet-notify` 和 OpenClaw 插件还会读取 `~/.codex-pet-bridge/token`，这样密钥只放在一个 `0600` 文件里，不用散落在多个配置中。
+- 控制台 API（`/status`、`/settings`、`/anim`、`/egg`）只接受同源请求，且目标主机必须是 IP、`localhost`、`.local` 名称或本机主机名，其他网页读不到，也无法借 DNS rebinding 访问。
 - 默认不存原始上游 payload。
 - 如果启用 `PET_BRIDGE_STORE_RAW=1`，会对常见 secret 字段做脱敏。
 - hook 是观察型；bridge 掉线不会影响上游工具继续运行。
@@ -523,6 +561,8 @@ npm run smoke
 ```bash
 node ./test/smoke.js
 ```
+
+完整测试（`node --test`）覆盖板子协议、设置、动画库和控制台 API。`node tools/ui-e2e.mjs <视频>` 会在 Chromium 里操作一遍控制台（需要 `playwright`），`tools/mac/test-install.sh` 用临时 home 目录演练 Mac 安装脚本。
 
 ## 贡献
 

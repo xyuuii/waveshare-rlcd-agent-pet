@@ -1,6 +1,6 @@
 {
   "name": "codex-pet-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local-first bridge that turns AI agent status into pet-friendly events for desktop pets and XiaoZhi devices.",
   "type": "module",
   "keywords": [
@@ -41,7 +41,8 @@
     "mcp": "node ./src/mcp-server.js",
     "notify": "node ./src/notify-client.js",
     "sync:tick": "node ./src/agent-sync.js --tick",
-    "smoke": "node ./test/smoke.js"
+    "smoke": "node ./test/smoke.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"

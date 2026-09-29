@@ -97,7 +97,13 @@ curl -sS http://127.0.0.1:17366/events \
 | `GET /notifications/next` | Read the next unread notification. |
 | `POST /notifications/:id/ack` | Mark one notification as read. |
 | `POST /notifications/ack-all` | Mark every notification as read. |
-| `GET /esp32/poll` | Compact polling endpoint for ESP32 / XiaoZhi devices. |
+| `GET /esp32/poll` | Compact polling endpoint for ESP32 / XiaoZhi devices. Also takes board telemetry and returns display settings, the time zone and easter-egg commands. |
+| `GET /esp32/anim/:id/frames` | Streams RLA1 animation frames to the board in small chunks. |
+| `GET /status` | Everything the dashboard and the menu bar app show: agents, usage, board telemetry, settings, animations. |
+| `GET` / `POST /settings` | Clock face, 12/24 h, seconds, one-shot page switch, time zone override, default animation. |
+| `GET /anim`, `GET` / `PUT` / `DELETE /anim/:id` | Animation library (RLA1 files uploaded from the dashboard). |
+| `POST /egg/play`, `POST /egg/stop` | Schedule or stop an animation on the board. |
+| `GET /ui/` | The RLCD dashboard (static files; its API calls need the token). |
 | `GET /health` | Health check. |
 
 ## Event Model
@@ -191,6 +197,8 @@ Add `pet-claude-hook` as an observational hook in user-level `~/.claude/settings
 Recommended starter events are `Notification`, `UserPromptSubmit`, and `Stop`. They are enough for "thinking / waiting for you / completed" without flooding the pet or XiaoZhi screen with every tool call.
 
 Hook failures exit with code `0`; Claude Code should never be blocked because the pet bridge is offline. Failed sends are written to the same bounded `PET_NOTIFY_QUEUE` used by `pet-notify`, and `pet-notify --flush` retries them later.
+
+Hooks are optional when the bridge runs on the same Mac as Claude Code: the bridge reads Claude Code's own session transcripts (`~/.claude/projects/*/*.jsonl`, or `$CLAUDE_CONFIG_DIR/projects`) to tell thinking, tool use, searching and finished turns apart, and to show today's tokens, the context window and the model. Nothing in Claude Code's configuration changes. Hooks remain the only way to see "waiting for your approval". Set `PET_BRIDGE_CLAUDE_TRANSCRIPTS=0` to turn the transcript reader off.
 
 ## Claude Desktop / MCP
 
@@ -415,6 +423,21 @@ Recommended source labels:
 | Hub Claude Code | `hub-claude` |
 | OpenClaw | `openclaw` |
 
+## RLCD Dashboard, Menu Bar App and Easter Egg
+
+The bridge serves a dashboard at `http://127.0.0.1:17366/ui/`:
+
+- what every agent is doing, with Claude Code's current tool, model and context
+- the board's battery, temperature, humidity, Wi-Fi signal, firmware and page
+- the seven clock faces, rendered by the firmware's own drawing code, plus 12/24 h, seconds and time zone
+- an easter-egg studio: pick a local video (for example your own copy of *Bad Apple!!*), convert it to 1-bit frames in the browser, upload the result and play it on the board, optionally with the video's sound playing in sync on the Mac
+
+Videos are decoded in the browser; only the 1-bit RLA1 frames reach the bridge, which keeps them in `PET_BRIDGE_ANIM_DIR` (default: `anim/` next to the state file). On the board, holding BOOT and KEY together for 2 s (or BOOT alone for 5 s) plays the default animation, or a built-in one when nothing is uploaded.
+
+`macos/PetBar` is a small menu bar app with the same information and the page, clock face and easter-egg controls. Build it with `macos/PetBar/build.sh --install` (needs the Xcode Command Line Tools).
+
+`tools/mac/install.sh` installs or repairs the bridge on a Mac: it copies the bridge to `~/.codex-pet-bridge/app`, keeps the token in `~/.codex-pet-bridge/token`, rewrites the LaunchAgents and points Hermes hooks and the OpenClaw plugin at the copy. It is a dry run unless you pass `--apply`, backs up every file it changes and has `--rollback`.
+
 ## ESP32 / XiaoZhi Polling
 
 For simple firmware or prototype screens, use HTTP polling:
@@ -456,6 +479,19 @@ If the device can only send GET:
 GET http://127.0.0.1:17366/esp32/poll?ack=<id>
 ```
 
+The RLCD firmware (1.3.0 and later) also reports telemetry in the same request, for example `&fw=1.3.0&bat=84&mv=3980&temp=22.6&hum=48&rssi=-52&up=3600&page=clock&style=segment&srev=…&erev=…&heap=…&clk=1&eggreq=…`, and the response carries a few extra fields that older firmware ignores:
+
+```json
+{
+  "server_time_ms": 1790671923000,
+  "display": { "rev": 1790671900, "clock_style": "segment", "hour12": false, "show_seconds": true, "page": "clock" },
+  "time": { "tz": "GMT0BST,M3.5.0/1,M10.5.0", "zone": "Europe/London" },
+  "egg": { "rev": 1790671920, "id": "badapple", "frames": 4382, "fps_x100": 2000, "width": 400, "height": 300, "start_at_ms": 1790671926500 }
+}
+```
+
+`display.page` is sent once per revision; the time zone follows the Mac (`/etc/localtime`) unless the dashboard sets an override.
+
 ## Security Model
 
 This is meant for trusted local machines and home-lab networks, not the public internet.
@@ -463,6 +499,8 @@ This is meant for trusted local machines and home-lab networks, not the public i
 - Binds to `127.0.0.1` by default.
 - Refuses non-loopback listening unless `PET_BRIDGE_TOKEN` is set.
 - Supports `Authorization: Bearer <token>`, `x-pet-bridge-token`, or `?token=...`.
+- Reads the token from `PET_BRIDGE_TOKEN` or the file named by `PET_BRIDGE_TOKEN_FILE`. Hooks, `pet-notify` and the OpenClaw plugin also look in `~/.codex-pet-bridge/token`, so the secret lives in one `0600` file instead of several configs.
+- The dashboard API (`/status`, `/settings`, `/anim`, `/egg`) answers only same-origin requests addressed to an IP, `localhost`, a `.local` name or this Mac's host name, so other web pages cannot read it or reach it through DNS rebinding.
 - Does not store raw upstream payloads unless `PET_BRIDGE_STORE_RAW=1`.
 - Redacts common secret-like fields if raw storage is enabled.
 - Keeps hooks observational so upstream tools continue working if the bridge is offline.
@@ -523,6 +561,8 @@ or:
 ```bash
 node ./test/smoke.js
 ```
+
+The full suite (`node --test`) covers the board protocol, settings, animation store and dashboard API. `node tools/ui-e2e.mjs <video>` drives the dashboard in Chromium (needs `playwright`), and `tools/mac/test-install.sh` runs the Mac installer against a throwaway home directory.
 
 ## Contributing
 
