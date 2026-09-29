@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>RLCD Pet 控制台</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img class="brand-mark" src="icon.svg" alt="" width="36" height="36">
+      <div>
+        <h1>RLCD Pet</h1>
+        <p class="sub">智能体宠物屏 · 控制台</p>
+      </div>
+    </div>
+    <div class="pills">
+      <span id="bridgePill" class="pill"><span class="dot"></span><span class="label">Bridge 连接中…</span></span>
+      <span id="boardPill" class="pill"><span class="dot"></span><span class="label">板子 —</span></span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card span-7" id="nowCard" aria-labelledby="nowTitle">
+      <header class="card-head">
+        <h2 id="nowTitle">现在</h2>
+        <span class="hint" id="nowUpdated"></span>
+      </header>
+      <div class="now-hero" id="nowHero" data-status="idle">
+        <div class="now-status"><span class="status-dot"></span><span id="nowStatus">空闲</span></div>
+        <div class="now-source" id="nowSource">还没有智能体活动</div>
+        <div class="now-task" id="nowTask"></div>
+        <div class="now-detail" id="nowDetail"></div>
+      </div>
+      <div class="usage" id="usageRow">
+        <div class="stat"><span class="stat-label" id="usageTodayLabel">TODAY</span><span class="stat-value" id="usageToday">--</span></div>
+        <div class="stat"><span class="stat-label" id="usageContextLabel">CONTEXT</span><span class="stat-value" id="usageContext">--</span></div>
+        <div class="stat"><span class="stat-label" id="usageQuotaLabel">QUOTA</span><span class="stat-value" id="usageQuota">--</span></div>
+      </div>
+      <h3 class="subhead">智能体 <span class="count" id="agentCount"></span></h3>
+      <ul class="agents" id="agentList"></ul>
+    </section>
+
+    <section class="card span-5" id="boardCard" aria-labelledby="boardTitle">
+      <header class="card-head">
+        <h2 id="boardTitle">板子</h2>
+        <span class="hint" id="boardSeen"></span>
+      </header>
+      <dl class="kv" id="boardKv"></dl>
+      <div class="board-empty" id="boardEmpty" hidden>
+        <p>还没有收到板子的请求。</p>
+        <p class="fineprint">固件 1.3.0 起，板子每次轮询都会带上电量、温湿度和 Wi-Fi 信号。旧固件仍能显示状态，只是这里看不到遥测。</p>
+      </div>
+      <h3 class="subhead">切换板子页面</h3>
+      <div class="seg" role="group" aria-label="切换板子页面" id="pageButtons">
+        <button type="button" data-page="overview">概览</button>
+        <button type="button" data-page="usage">用量</button>
+        <button type="button" data-page="clock">时钟</button>
+      </div>
+      <p class="fineprint">板子上：短按 BOOT 换页；时钟页短按 KEY 换表盘。</p>
+    </section>
+
+    <section class="card span-12" id="clockCard" aria-labelledby="clockTitle">
+      <header class="card-head">
+        <h2 id="clockTitle">时钟表盘</h2>
+        <div class="toggles">
+          <label class="switch"><input type="checkbox" id="hour12Toggle"><span class="track"></span><span>12 小时制</span></label>
+          <label class="switch"><input type="checkbox" id="secondsToggle"><span class="track"></span><span>显示秒</span></label>
+        </div>
+      </header>
+      <div class="faces" id="faces" role="group" aria-label="表盘"></div>
+      <details class="tz" id="tzDetails">
+        <summary>时区 <span class="tz-summary" id="tzSummary">—</span></summary>
+        <div class="tz-body">
+          <p class="fineprint">默认跟随这台 Mac 的系统时区，夏令时由板子按 POSIX 规则自动切换。只有在需要显示别处时间时才填覆盖值。</p>
+          <form class="tz-form" id="tzForm">
+            <input id="tzInput" name="tz" placeholder="例如 CST-8 或 GMT0BST,M3.5.0/1,M10.5.0" autocomplete="off" spellcheck="false">
+            <button type="submit">保存覆盖</button>
+            <button type="button" id="tzClear" class="ghost">跟随系统</button>
+          </form>
+        </div>
+      </details>
+    </section>
+
+    <section class="card span-7" id="studioCard" aria-labelledby="studioTitle">
+      <header class="card-head">
+        <h2 id="studioTitle">彩蛋工坊</h2>
+        <span class="hint">本地视频 → 1-bit 动画</span>
+      </header>
+
+      <label class="drop" id="drop">
+        <input type="file" accept="video/*" id="fileInput">
+        <span class="drop-icon" aria-hidden="true"></span>
+        <span class="drop-title">拖入或选择一个本地视频</span>
+        <span class="drop-sub">例如你自己的 Bad Apple!! 视频文件。黑白剪影类视频效果最好。</span>
+      </label>
+
+      <div class="studio" id="studio" hidden>
+        <div class="file-line">
+          <span class="file-name" id="fileName"></span>
+          <span class="file-meta" id="fileMeta"></span>
+          <button type="button" class="ghost small" id="changeFile">换一个</button>
+        </div>
+        <div class="preview-pair">
+          <figure>
+            <video id="srcVideo" playsinline preload="auto"></video>
+            <figcaption>原视频</figcaption>
+          </figure>
+          <figure>
+            <div class="screen"><canvas id="bitCanvas" width="400" height="300"></canvas></div>
+            <figcaption>板子上的样子（模拟）</figcaption>
+          </figure>
+        </div>
+        <label class="scrub"><span>预览位置</span><input type="range" id="scrub" min="0" max="1000" value="300"></label>
+
+        <div class="controls">
+          <label class="field"><span>尺寸</span>
+            <select id="sizeSelect">
+              <option value="full">铺满 400×300</option>
+              <option value="half">200×150（板子放大 2 倍，省流量）</option>
+            </select>
+          </label>
+          <label class="field"><span>帧率</span>
+            <select id="fpsSelect">
+              <option value="10">10 fps</option>
+              <option value="15">15 fps</option>
+              <option value="20" selected>20 fps</option>
+              <option value="24">24 fps</option>
+              <option value="30">30 fps</option>
+            </select>
+          </label>
+          <div class="field"><span>处理</span>
+            <div class="seg small" role="group" aria-label="处理方式" id="modeButtons">
+              <button type="button" data-mode="threshold" aria-pressed="true">阈值</button>
+              <button type="button" data-mode="dither" aria-pressed="false">抖动</button>
+            </div>
+          </div>
+          <label class="field grow" id="thresholdField"><span>阈值 <output id="thresholdValue">128</output></span>
+            <input type="range" id="threshold" min="16" max="240" value="128">
+          </label>
+          <label class="check"><input type="checkbox" id="invert"> 反色</label>
+          <label class="field"><span>开始（秒）</span><input type="number" id="clipStart" min="0" step="0.1" value="0"></label>
+          <label class="field"><span>结束（秒）</span><input type="number" id="clipEnd" min="0" step="0.1"></label>
+          <label class="check" title="逐帧跳转取帧，较慢但不依赖播放速度"><input type="checkbox" id="precise"> 精确逐帧</label>
+        </div>
+
+        <div class="estimate" id="estimate"></div>
+
+        <div class="actions">
+          <label class="field name-field"><span>动画名</span><input id="animName" placeholder="badapple" maxlength="48" autocomplete="off" spellcheck="false"></label>
+          <button type="button" class="primary" id="convertBtn">转换并上传</button>
+          <button type="button" class="ghost" id="cancelBtn" hidden>取消</button>
+        </div>
+        <div class="progress" id="progress" hidden>
+          <div class="bar"><span id="progressBar"></span></div>
+          <span class="progress-text" id="progressText"></span>
+        </div>
+        <p class="fineprint" id="keepVisible" hidden>转换时请让这个标签页保持在前台，浏览器会暂停后台视频。</p>
+      </div>
+      <p class="fineprint">视频只在这个浏览器里解码；上传到这台 Mac 的 bridge 的只有 1-bit 帧（RLA1 格式），不会离开你的网络。请只使用你有权使用的视频。</p>
+    </section>
+
+    <section class="card span-5" id="libraryCard" aria-labelledby="libraryTitle">
+      <header class="card-head">
+        <h2 id="libraryTitle">动画库</h2>
+        <span class="hint" id="eggPhase"></span>
+      </header>
+      <div class="screen mirror"><canvas id="mirrorCanvas" width="400" height="300"></canvas><span class="mirror-label" id="mirrorLabel">待机</span></div>
+      <div class="egg-controls">
+        <button type="button" class="ghost small" id="stopEgg" disabled>停止播放</button>
+        <label class="check" id="soundToggleWrap"><input type="checkbox" id="soundToggle"> 用本地视频同步放声音</label>
+        <label class="field offset-field"><span>声音偏移 <output id="offsetValue">0 ms</output></span>
+          <input type="range" id="audioOffset" min="-600" max="600" step="10" value="0">
+        </label>
+      </div>
+      <ul class="anims" id="animList"></ul>
+      <p class="empty" id="animEmpty">还没有上传的动画。板子会播放内置的小彩蛋。</p>
+      <p class="fineprint">秘技：在板子上同时按住 BOOT 和 KEY 2 秒，或长按 BOOT 5 秒，会播放标记为「默认」的动画；没有动画时播放内置彩蛋。播放中按任意键停止。</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span id="footerBridge"></span>
+    <span>表盘预览由固件绘图代码在电脑上渲染，像素一致，但反射屏的对比度和视角与显示器不同。</span>
+  </footer>
+
+  <dialog id="tokenDialog">
+    <form method="dialog" id="tokenForm">
+      <h2>需要访问令牌</h2>
+      <p>这个 bridge 开启了令牌保护。令牌保存在这台 Mac 的 <code>~/.codex-pet-bridge/token</code>，菜单栏 App 的「打开控制台」会自动带上它。</p>
+      <input id="tokenInput" type="password" autocomplete="off" placeholder="粘贴令牌" required>
+      <div class="dialog-actions">
+        <button type="submit" class="primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

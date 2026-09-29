@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import { resolveBridgeToken } from "./token-file.js";
+
 const DEFAULT_BRIDGE_URL = process.env.PET_BRIDGE_URL || "http://127.0.0.1:17366/events";
 const DEFAULT_QUEUE_PATH = resolve(process.env.PET_NOTIFY_QUEUE || join(homedir(), ".codex-pet-bridge", "notify-outbox.jsonl"));
 const DEFAULT_TIMEOUT_MS = numberFromEnv("PET_BRIDGE_HOOK_TIMEOUT_MS", 1200);
@@ -49,7 +51,7 @@ export async function postEvent(event, options = {}) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const headers = { "content-type": "application/json" };
-    const token = process.env.PET_BRIDGE_TOKEN || "";
+    const token = resolveBridgeToken();
     if (token) headers.authorization = `Bearer ${token}`;
     const response = await fetch(targetUrl, {
       method: "POST",

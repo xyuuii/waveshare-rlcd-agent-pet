@@ -146,7 +146,8 @@ function mergeSlot(slot, item) {
 
 export function buildVisibleAgentSlots(events, current = null) {
   const slots = [];
-  const candidates = current ? [...events, current] : [...events];
+  const extras = Array.isArray(current) ? current.filter(Boolean) : current ? [current] : [];
+  const candidates = [...events, ...extras];
 
   for (const item of candidates) {
     if (!hasSlotIdentity(item)) continue;
@@ -159,6 +160,16 @@ export function buildVisibleAgentSlots(events, current = null) {
   }
 
   return sortVisibleAgentSlots(slots);
+}
+
+// Drops agents that have been quiet for too long and keeps the board's list short.
+// Slots arrive sorted (attention, active, completed, ... then newest first).
+export function pruneAndCapSlots(slots, { maxSlots = 6, maxAgeMs = 12 * 60 * 60 * 1000, now = Date.now() } = {}) {
+  const fresh = slots.filter((slot) => {
+    const updated = Date.parse(slot.updated_at || 0);
+    return Number.isFinite(updated) && now - updated <= maxAgeMs;
+  });
+  return fresh.slice(0, Math.max(1, maxSlots));
 }
 
 export function resolveFocusSelection({ focus, slots, autoCurrent }) {

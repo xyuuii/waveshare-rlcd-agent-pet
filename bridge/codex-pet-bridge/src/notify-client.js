@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import { resolveBridgeToken } from "./token-file.js";
+
 const DEFAULT_BRIDGE_URL = process.env.PET_BRIDGE_URL || "http://127.0.0.1:17366/events";
 const DEFAULT_QUEUE_PATH = process.env.PET_NOTIFY_QUEUE || join(homedir(), ".codex-pet-bridge", "notify-outbox.jsonl");
 const SEND_TIMEOUT_MS = numberFromEnv("PET_NOTIFY_TIMEOUT_MS", 1200);
@@ -142,7 +144,7 @@ async function sendEvent(targetUrl, event) {
   if (!guard.ok) return guard;
   try {
     const headers = { "content-type": "application/json" };
-    const token = process.env.PET_BRIDGE_TOKEN || "";
+    const token = resolveBridgeToken();
     if (token) headers.authorization = `Bearer ${token}`;
     const response = await fetch(targetUrl, {
       method: "POST",
@@ -162,7 +164,7 @@ function allowedTarget(targetUrl) {
     const url = new URL(targetUrl);
     const host = url.hostname.toLowerCase();
     const loopback = ["127.0.0.1", "::1", "localhost"].includes(host);
-    const hasToken = Boolean(process.env.PET_BRIDGE_TOKEN || url.searchParams.get("token"));
+    const hasToken = Boolean(resolveBridgeToken() || url.searchParams.get("token"));
     if (loopback || process.env.PET_NOTIFY_ALLOW_REMOTE === "1" || hasToken) return { ok: true };
     return { ok: false, error: "remote-target-requires-token-or-PET_NOTIFY_ALLOW_REMOTE" };
   } catch (error) {

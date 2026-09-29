@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -193,7 +194,7 @@ async function postEvent(event, bridgeUrl) {
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   try {
     const headers = { "content-type": "application/json" };
-    const token = process.env.PET_BRIDGE_TOKEN || "";
+    const token = bridgeToken();
     if (token) headers.authorization = `Bearer ${token}`;
     const response = await fetch(bridgeUrl || DEFAULT_BRIDGE_URL, {
       method: "POST",
@@ -207,6 +208,18 @@ async function postEvent(event, bridgeUrl) {
     return { ok: false, error: error.message || String(error) };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Same lookup as src/token-file.js, inlined so the plugin has no relative imports.
+function bridgeToken() {
+  const direct = String(process.env.PET_BRIDGE_TOKEN || "").trim();
+  if (direct) return direct;
+  const file = String(process.env.PET_BRIDGE_TOKEN_FILE || "").trim() || join(homedir(), ".codex-pet-bridge", "token");
+  try {
+    return readFileSync(file, "utf8").trim();
+  } catch {
+    return "";
   }
 }
 

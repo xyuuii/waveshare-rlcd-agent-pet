@@ -29,6 +29,7 @@ const server = spawn(process.execPath, ["./src/bridge-server.js"], {
     PET_BRIDGE_PORT: String(port),
     PET_BRIDGE_LOG: join(tempRoot, "events.jsonl"),
     PET_BRIDGE_STATE: join(tempRoot, "bridge-state.json"),
+    PET_BRIDGE_CLAUDE_PROJECTS: join(tempRoot, "claude-projects"),
     PET_BRIDGE_CODEX_STATE: join(tempRoot, "state.sqlite"),
     PET_BRIDGE_CODEX_CWD: "/smoke-test",
     PET_BRIDGE_CODEX_SESSIONS: join(tempRoot, "sessions"),

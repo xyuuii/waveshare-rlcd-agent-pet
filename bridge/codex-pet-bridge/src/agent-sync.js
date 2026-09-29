@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { DEFAULT_CLAUDE_PROJECTS_DIR, loadClaudeRealtimeState } from "./claude-session-status.js";
 import { buildHermesLogSyncNotifications } from "./hermes-log-channel.js";
 import { readHermesLogActivity } from "./hermes-log-sync.js";
 
@@ -12,6 +14,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const NOTIFY_CLIENT = resolve(HERE, "notify-client.js");
 const STATE_PATH = resolve(process.env.PET_AGENT_SYNC_STATE || join(homedir(), ".codex-pet-bridge", "agent-sync-state.json"));
 const CODEX_SESSIONS_DIR = resolve(process.env.CODEX_SESSIONS_DIR || join(homedir(), ".codex", "sessions"));
+const CLAUDE_PROJECTS_DIR = resolve(process.env.PET_BRIDGE_CLAUDE_PROJECTS || DEFAULT_CLAUDE_PROJECTS_DIR);
 const HERMES_LOG_PATH = resolve(process.env.PET_AGENT_SYNC_HERMES_LOG || join(homedir(), ".hermes", "logs", "agent.log"));
 const SOURCE_PREFIX = process.env.PET_AGENT_SYNC_PREFIX || "local";
 const ACTIVE_WINDOW_MS = numberFromEnv("PET_AGENT_SYNC_ACTIVE_WINDOW_MS", 45000);
@@ -44,7 +47,7 @@ async function tick() {
   });
   await updateChannel(state, {
     key: "claude",
-    active: claudeActive(),
+    active: await claudeActive(),
     source: `${SOURCE_PREFIX}-claude`,
     task: `${SOURCE_PREFIX}-claude-session`,
     runningMessage: `${SOURCE_PREFIX} Claude Code is working`,
@@ -136,13 +139,31 @@ function codexCliActive() {
   return false;
 }
 
-function claudeActive() {
+// Claude Code writes a transcript per session; when those exist they say
+// exactly when a turn is running. The process scan is only a fallback.
+async function claudeActive() {
+  if (process.env.PET_AGENT_SYNC_CLAUDE === "0") return false;
+  if (existsSync(CLAUDE_PROJECTS_DIR)) {
+    const state = await loadClaudeRealtimeState({
+      projectsDir: CLAUDE_PROJECTS_DIR,
+      activeWindowMs: ACTIVE_WINDOW_MS,
+      sourcePrefix: SOURCE_PREFIX
+    }).catch(() => null);
+    if (state) return state.status !== "completed";
+    if (process.env.PET_AGENT_SYNC_CLAUDE_PROCESS_SCAN !== "1") return false;
+  }
+  return claudeProcessActive();
+}
+
+function claudeProcessActive() {
   if (process.env.PET_AGENT_SYNC_CLAUDE_PROCESS_SCAN === "0") return false;
   for (const proc of listProcesses()) {
     if (proc.pid === process.pid) continue;
     const command = proc.command.toLowerCase();
     if (!/\bclaude\b/.test(command)) continue;
     if (command.includes("claude-hook") || command.includes("agent-sync")) continue;
+    // The Claude desktop app (and its helpers) is not Claude Code.
+    if (command.includes(".app/")) continue;
     if (proc.cpu >= 1 || proc.stat.includes("R")) return true;
   }
   return false;
@@ -243,6 +264,9 @@ Environment:
   PET_AGENT_SYNC_PREFIX=laptop
   PET_BRIDGE_URL=http://127.0.0.1:17366/events
   CODEX_SESSIONS_DIR=~/.codex/sessions
+  PET_BRIDGE_CLAUDE_PROJECTS=~/.claude/projects
+  PET_AGENT_SYNC_CLAUDE=0                  (skip Claude Code entirely)
+  PET_AGENT_SYNC_CLAUDE_PROCESS_SCAN=1     (also scan processes when transcripts exist)
   PET_AGENT_SYNC_HERMES_LOG=~/.hermes/logs/agent.log
   PET_AGENT_SYNC_INTERVAL_MS=15000
 `);

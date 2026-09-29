@@ -85,6 +85,53 @@ export function pickCurrentState(eventCurrent, codexRealtime) {
   return null;
 }
 
+const ACTIVE_STATUSES = new Set([
+  "needs-attention",
+  "running",
+  "working",
+  "thinking",
+  "searching",
+  "tool-use",
+  "started",
+  "progress",
+  "near-complete"
+]);
+
+function timeValue(item) {
+  const value = Date.parse(item?.time || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function newest(items) {
+  let best = null;
+  for (const item of items) {
+    if (!best || timeValue(item) > timeValue(best)) best = item;
+  }
+  return best;
+}
+
+/**
+ * Pick the auto "current" state from the latest bridge event and several
+ * realtime views (Codex rollout, Claude Code transcript, ...).
+ *
+ * The realtime view of the event's own agent family refines it exactly like
+ * pickCurrentState. When the result is no longer active, a newer active agent
+ * from another family takes over, so a finished Codex turn does not hide a
+ * Claude Code session that is working right now.
+ */
+export function pickAutoCurrent(eventCurrent, realtimes = []) {
+  const list = (Array.isArray(realtimes) ? realtimes : [realtimes]).filter(Boolean);
+  const eventFamily = sourceFamily(eventCurrent?.source);
+  const sameFamily = newest(list.filter((item) => !eventFamily || sourceFamily(item.source) === eventFamily));
+  const refined = pickCurrentState(eventCurrent, sameFamily);
+  if (refined && ACTIVE_STATUSES.has(refined.status)) return refined;
+  const refinedTime = timeValue(refined);
+  const takeover = newest(
+    list.filter((item) => item !== refined && ACTIVE_STATUSES.has(item.status) && timeValue(item) > refinedTime)
+  );
+  return takeover || refined || newest(list);
+}
+
 function sourceFamily(source) {
   const text = String(source || "").toLowerCase();
   if (text.includes("codex")) return "codex";

@@ -3,12 +3,26 @@ import http from "node:http";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, hostname as osHostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { inferCodexRealtimeStateFromLines, pickCurrentState } from "./codex-session-status.js";
-import { buildVisibleAgentSlots, resolveFocusSelection } from "./device-focus.js";
+import { fileURLToPath } from "node:url";
+
+import { AnimStore } from "./anim-store.js";
+import {
+  DEFAULT_CLAUDE_PROJECTS_DIR,
+  claudeTokensToday,
+  loadClaudeRealtimeState,
+  shortModelName
+} from "./claude-session-status.js";
+import { inferCodexRealtimeStateFromLines, pickAutoCurrent } from "./codex-session-status.js";
+import { buildVisibleAgentSlots, pruneAndCapSlots, resolveFocusSelection } from "./device-focus.js";
+import { DeviceRegistry, parseTelemetry } from "./device-registry.js";
+import { ANIM_ID_PATTERN, SettingsStore, displayCommand } from "./display-settings.js";
+import { EggController } from "./egg-controller.js";
+import { readSystemTimezone } from "./system-timezone.js";
+import { resolveBridgeToken } from "./token-file.js";
 
 const PORT = numberFromEnv("PET_BRIDGE_PORT", 17366);
 const HOST = process.env.PET_BRIDGE_HOST || "127.0.0.1";
@@ -18,7 +32,7 @@ const WEBHOOK_TOKEN = process.env.PET_WEBHOOK_TOKEN || "";
 const XIAOZHI_ASSISTANT_URL = stripTrailingSlash(process.env.XIAOZHI_ASSISTANT_URL || "");
 const XIAOZHI_SOURCE_PREFIX = process.env.XIAOZHI_SOURCE_PREFIX || "";
 const XIAOZHI_WEBHOOK_TOKEN = process.env.XIAOZHI_WEBHOOK_TOKEN || "";
-const INBOUND_TOKEN = process.env.PET_BRIDGE_TOKEN || "";
+const INBOUND_TOKEN = resolveBridgeToken({ allowDefaultFile: false });
 const MAX_EVENTS = numberFromEnv("PET_BRIDGE_MAX_EVENTS", 200);
 const MAX_NOTIFICATIONS = numberFromEnv("PET_BRIDGE_MAX_NOTIFICATIONS", 100);
 const MAX_BODY_BYTES = numberFromEnv("PET_BRIDGE_MAX_BODY_BYTES", 65536);
@@ -44,6 +58,18 @@ const USAGE_CACHE_MS = numberFromEnv("PET_BRIDGE_USAGE_CACHE_MS", 10000);
 const CODEX_REALTIME_ACTIVE_MS = numberFromEnv("PET_BRIDGE_CODEX_REALTIME_ACTIVE_MS", 120000);
 const CODEX_COMPLETED_HOLD_MS = numberFromEnv("PET_BRIDGE_CODEX_COMPLETED_HOLD_MS", 20000);
 const CODEX_SOURCE_PREFIX = (process.env.PET_AGENT_SYNC_PREFIX || "local").trim();
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SETTINGS_PATH = resolve(process.env.PET_BRIDGE_SETTINGS || join(dirname(STATE_PATH), "display-settings.json"));
+const ANIM_DIR = resolve(process.env.PET_BRIDGE_ANIM_DIR || join(dirname(STATE_PATH), "anim"));
+const UI_DIR = resolve(process.env.PET_BRIDGE_UI_DIR || join(HERE, "..", "ui"));
+const MAX_UPLOAD_BYTES = numberFromEnv("PET_BRIDGE_MAX_UPLOAD_BYTES", 48 * 1024 * 1024);
+const CLAUDE_PROJECTS_DIR = resolve(process.env.PET_BRIDGE_CLAUDE_PROJECTS || DEFAULT_CLAUDE_PROJECTS_DIR);
+const CLAUDE_REALTIME_ENABLED = process.env.PET_BRIDGE_CLAUDE_TRANSCRIPTS !== "0";
+const MAX_DEVICE_SLOTS = numberFromEnv("PET_BRIDGE_MAX_DEVICE_SLOTS", 6);
+const SLOT_MAX_AGE_MS = numberFromEnv("PET_BRIDGE_SLOT_MAX_AGE_MS", 12 * 60 * 60 * 1000);
+const EGG_DELAY_MS = numberFromEnv("PET_BRIDGE_EGG_DELAY_MS", 3500);
+const BRIDGE_VERSION = await readPackageVersion();
+const STARTED_AT = Date.now();
 
 const recentEvents = [];
 const recentNotifications = [];
@@ -60,6 +86,11 @@ let usageCache = {
   loadedAt: 0,
   data: null
 };
+let claudeCache = { loadedAt: 0, realtime: null, today: 0, todayLoadedAt: 0 };
+const settingsStore = new SettingsStore(SETTINGS_PATH);
+const deviceRegistry = new DeviceRegistry();
+const animStore = new AnimStore(ANIM_DIR, { maxBytes: MAX_UPLOAD_BYTES });
+const eggController = new EggController();
 const execFileAsync = promisify(execFile);
 
 if (!isLoopbackHost(HOST) && !INBOUND_TOKEN && process.env.PET_BRIDGE_ALLOW_UNAUTH_REMOTE !== "1") {
@@ -69,6 +100,7 @@ if (!isLoopbackHost(HOST) && !INBOUND_TOKEN && process.env.PET_BRIDGE_ALLOW_UNAU
 }
 
 await loadPersistentState();
+await settingsStore.load();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -81,6 +113,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${PORT}`}`);
+    // The dashboard's static files carry no data; every API call below still needs the token.
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/ui")) {
+      res.writeHead(302, { location: "/ui/" });
+      res.end();
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/ui/")) {
+      await serveUiFile(url.pathname, res);
+      return;
+    }
+    if (PRIVATE_API.test(url.pathname)) {
+      // Dashboard and menu bar API: never readable by other websites, and
+      // requests must name this machine (blocks DNS rebinding).
+      res.removeHeader("Access-Control-Allow-Origin");
+      if (!isTrustedHost(req.headers.host) || !isSameOriginOrNone(req)) {
+        sendJson(res, 403, { ok: false, error: "forbidden" });
+        return;
+      }
+    }
     if (!isAuthorized(req, url)) {
       sendJson(res, 401, { ok: false, error: "unauthorized" });
       return;
@@ -131,7 +182,101 @@ const server = http.createServer(async (req, res) => {
       const ackId = url.searchParams.get("ack");
       if (ackId) await ackNotification(ackId);
       const focus = stringValue(url.searchParams.get("focus")) || "auto";
-      sendJson(res, 200, await compactDeviceState({ focus }));
+      const { eggRequested } = deviceRegistry.update(parseTelemetry(url.searchParams), {
+        address: clientAddress(req)
+      });
+      if (eggRequested) await playDefaultEgg("board");
+      sendJson(res, 200, { ...(await compactDeviceState({ focus })), ...boardCommands() });
+      return;
+    }
+
+    const chunkMatch = url.pathname.match(/^\/esp32\/anim\/([^/]+)\/frames$/);
+    if (req.method === "GET" && chunkMatch) {
+      const id = decodeURIComponent(chunkMatch[1]);
+      const start = Math.max(0, Math.trunc(numberFromValue(url.searchParams.get("start"), 0)));
+      const count = Math.max(1, Math.min(1000, Math.trunc(numberFromValue(url.searchParams.get("count"), 60))));
+      const maxBytes = Math.max(1024, Math.min(65536, Math.trunc(numberFromValue(url.searchParams.get("max_bytes"), 16384))));
+      const chunk = await animStore.chunk(id, start, count, maxBytes);
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": chunk.bytes.length,
+        "x-rla-start": String(chunk.start),
+        "x-rla-count": String(chunk.count),
+        "cache-control": "no-store"
+      });
+      res.end(Buffer.from(chunk.bytes.buffer, chunk.bytes.byteOffset, chunk.bytes.length));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/status") {
+      sendJson(res, 200, await statusView());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/settings") {
+      sendJson(res, 200, { ok: true, settings: settingsStore.get(), timezone: timezoneView() });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/settings") {
+      const patch = await readJson(req);
+      const result = await settingsStore.update(patch);
+      sendJson(res, result.errors.length ? 400 : 200, {
+        ok: result.errors.length === 0,
+        errors: result.errors,
+        settings: result.settings
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/anim") {
+      sendJson(res, 200, { ok: true, animations: await animStore.list(), maxBytes: MAX_UPLOAD_BYTES });
+      return;
+    }
+
+    const animMatch = url.pathname.match(/^\/anim\/([^/]+)$/);
+    if (animMatch && ["GET", "PUT", "DELETE"].includes(req.method)) {
+      const id = decodeURIComponent(animMatch[1]);
+      if (!ANIM_ID_PATTERN.test(id)) {
+        sendJson(res, 400, { ok: false, error: "invalid animation id" });
+        return;
+      }
+      if (req.method === "GET") {
+        const { bytes } = await animStore.load(id);
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": bytes.length,
+          "cache-control": "no-store"
+        });
+        res.end(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.length));
+        return;
+      }
+      if (req.method === "DELETE") {
+        await animStore.remove(id);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      const body = await readRawBody(req, MAX_UPLOAD_BYTES);
+      const animation = await animStore.put(id, new Uint8Array(body.buffer, body.byteOffset, body.length));
+      sendJson(res, 201, { ok: true, animation });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/egg/play") {
+      const body = await readJson(req);
+      const id = stringValue(body.id) || settingsStore.get().defaultAnimation;
+      if (!id) {
+        sendJson(res, 400, { ok: false, error: "no animation id and no default animation" });
+        return;
+      }
+      const meta = await animStore.describe(id);
+      const delayMs = numberFromValue(body.delayMs, EGG_DELAY_MS);
+      sendJson(res, 200, { ok: true, serverTimeMs: Date.now(), egg: eggController.play(meta, { delayMs }) });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/egg/stop") {
+      sendJson(res, 200, { ok: true, egg: eggController.stop() });
       return;
     }
 
@@ -163,7 +308,8 @@ const server = http.createServer(async (req, res) => {
 
     sendJson(res, 404, { ok: false, error: "not_found" });
   } catch (error) {
-    sendJson(res, 500, { ok: false, error: error.message || String(error) });
+    const status = Number.isInteger(error?.status) ? error.status : 500;
+    sendJson(res, status, { ok: false, error: error.message || String(error) });
   }
 });
 
@@ -395,20 +541,42 @@ async function ackAllNotifications() {
   return count;
 }
 
-async function compactDeviceState(options = {}) {
-  const notification = unreadNotifications().at(0) || null;
+// The board, the dashboard and the menu bar app all poll; one view per focus
+// per 750 ms keeps sqlite/tail calls down without making the board feel late.
+let agentViewCache = { key: "", at: 0, value: null };
+
+async function agentView(options = {}) {
+  const key = `${options.focus || "auto"}|${recentEvents.length}|${recentEvents.at(-1)?.id || ""}`;
+  if (agentViewCache.key === key && Date.now() - agentViewCache.at < 750) return agentViewCache.value;
+  const value = await buildAgentView(options);
+  agentViewCache = { key, at: Date.now(), value };
+  return value;
+}
+
+async function buildAgentView(options = {}) {
   const eventCurrent = recentEvents.at(-1) || null;
   const latestCodexEvent = [...recentEvents].reverse().find((item) => sourceFamily(item.source) === "codex") || null;
   const codexRealtime = await loadCodexRealtimeState(latestCodexEvent);
-  const autoCurrent = pickCurrentState(eventCurrent, codexRealtime);
-  const visibleSlots = buildVisibleAgentSlots(recentEvents, codexRealtime);
+  const claudeRealtime = await loadClaudeRealtimeCached();
+  const realtimes = [codexRealtime, claudeRealtime].filter(Boolean);
+  const autoCurrent = pickAutoCurrent(eventCurrent, realtimes);
+  const visibleSlots = pruneAndCapSlots(buildVisibleAgentSlots(recentEvents, realtimes), {
+    maxSlots: MAX_DEVICE_SLOTS,
+    maxAgeMs: SLOT_MAX_AGE_MS
+  });
   const selected = resolveFocusSelection({
     focus: options.focus,
     slots: visibleSlots,
     autoCurrent: slotStateFromCurrent(autoCurrent)
   });
   const current = materializeCurrentState(selected, autoCurrent);
-  const usage = await loadUsageSummary(current);
+  const usage = await loadUsageSummary(current, claudeRealtime);
+  return { selected, current, visibleSlots, usage, codexRealtime, claudeRealtime };
+}
+
+async function compactDeviceState(options = {}) {
+  const notification = unreadNotifications().at(0) || null;
+  const { selected, current, visibleSlots, usage } = await agentView(options);
   return {
     ok: true,
     unread_count: unreadNotifications().length,
@@ -478,11 +646,128 @@ function materializeCurrentState(selected, autoCurrent) {
   };
 }
 
-async function loadUsageSummary(current) {
+async function loadUsageSummary(current, claudeRealtime = null) {
   if (!current?.source || sourceFamily(current.source) === "codex") {
     return await loadCodexUsageSummary();
   }
+  if (sourceFamily(current.source) === "claude" && CLAUDE_REALTIME_ENABLED) {
+    return await loadClaudeUsageSummary(claudeRealtime);
+  }
   return buildLocalActivityUsage(current);
+}
+
+async function loadClaudeRealtimeCached() {
+  if (!CLAUDE_REALTIME_ENABLED) return null;
+  if (Date.now() - claudeCache.loadedAt < 1500) return claudeCache.realtime;
+  let realtime = null;
+  try {
+    realtime = await loadClaudeRealtimeState({ projectsDir: CLAUDE_PROJECTS_DIR, sourcePrefix: CODEX_SOURCE_PREFIX });
+  } catch {
+    realtime = null;
+  }
+  claudeCache = { ...claudeCache, loadedAt: Date.now(), realtime };
+  return realtime;
+}
+
+async function loadClaudeUsageSummary(claudeRealtime) {
+  if (Date.now() - claudeCache.todayLoadedAt > USAGE_CACHE_MS) {
+    try {
+      claudeCache.today = await claudeTokensToday({ projectsDir: CLAUDE_PROJECTS_DIR });
+    } catch {
+      claudeCache.today = 0;
+    }
+    claudeCache.todayLoadedAt = Date.now();
+  }
+  const realtime = claudeRealtime || claudeCache.realtime;
+  const context = realtime?.context;
+  const model = shortModelName(realtime?.model);
+  return usageSummary({
+    today: claudeCache.today > 0 ? `${abbrevNumber(claudeCache.today)} tok` : "--",
+    context: context ? `${abbrevNumber(context.used)} / ${abbrevNumber(context.window)}` : "--",
+    quota: model || "--",
+    todayLabel: "TODAY",
+    todayHint: "Claude Code tokens today, no cache reads",
+    contextLabel: "CONTEXT",
+    contextHint: "Last turn context / model window",
+    quotaLabel: "MODEL",
+    quotaHint: "Plan limits are not exposed locally",
+    quotaStyle: "text"
+  });
+}
+
+function timezoneView() {
+  const system = readSystemTimezone();
+  const override = settingsStore.get().tzOverride;
+  return { zone: system.zone, posix: system.posix, override, effective: override || system.posix };
+}
+
+// Extra instructions for the board, appended to /esp32/poll.
+function boardCommands() {
+  const commands = { server_time_ms: Date.now() };
+  const display = displayCommand(settingsStore.get());
+  if (display) commands.display = display;
+  const tz = timezoneView();
+  if (tz.effective) commands.time = { tz: tz.effective, zone: tz.zone };
+  const egg = eggController.command();
+  if (egg) commands.egg = egg;
+  return commands;
+}
+
+async function playDefaultEgg(reason) {
+  const preferred = settingsStore.get().defaultAnimation;
+  const animations = await animStore.list();
+  const meta = animations.find((item) => item.id === preferred) || animations[0];
+  if (!meta) {
+    console.log(`egg requested by ${reason}: no animation uploaded, the board plays its built-in one`);
+    return null;
+  }
+  console.log(`egg requested by ${reason}: playing ${meta.id}`);
+  return eggController.play(meta, { delayMs: EGG_DELAY_MS });
+}
+
+async function statusView() {
+  const { selected, current, visibleSlots, usage, codexRealtime, claudeRealtime } = await agentView({ focus: "auto" });
+  return {
+    ok: true,
+    serverTimeMs: Date.now(),
+    bridge: {
+      version: BRIDGE_VERSION,
+      startedAt: new Date(STARTED_AT).toISOString(),
+      uptimeS: Math.round((Date.now() - STARTED_AT) / 1000),
+      host: HOST,
+      port: PORT,
+      tokenRequired: Boolean(INBOUND_TOKEN)
+    },
+    device: deviceRegistry.snapshot(),
+    current: current
+      ? { source: current.source || "", task: current.task || "", status: current.status || "idle", time: current.time || "" }
+      : null,
+    agents: visibleSlots.map((slot) => ({
+      ...compactAgentSlot(slot),
+      family: sourceFamily(slot.source),
+      project: slugFromPath(slot.workspace)
+    })),
+    focusCount: selected.focusCount,
+    usage,
+    realtime: {
+      codex: codexRealtime ? { status: codexRealtime.status, time: codexRealtime.time } : null,
+      claude: claudeRealtime
+        ? {
+            status: claudeRealtime.status,
+            time: claudeRealtime.time,
+            tool: claudeRealtime.tool,
+            model: claudeRealtime.model,
+            context: claudeRealtime.context,
+            project: slugFromPath(claudeRealtime.workspace)
+          }
+        : null
+    },
+    unreadCount: unreadNotifications().length,
+    settings: settingsStore.get(),
+    timezone: timezoneView(),
+    animations: await animStore.list(),
+    egg: eggController.state()
+  };
 }
 
 async function loadCodexUsageSummary() {
@@ -1045,6 +1330,105 @@ async function writePersistentState() {
     await rename(tmpPath, STATE_PATH);
   } catch {
     // State persistence is best-effort; event ingestion remains available.
+  }
+}
+
+async function readRawBody(req, maxBytes) {
+  const declared = Number(req.headers["content-length"] || 0);
+  if (declared > maxBytes) throw Object.assign(new Error("request body too large"), { status: 413 });
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw Object.assign(new Error("request body too large"), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+const UI_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".json": "application/json"
+};
+
+async function serveUiFile(pathname, res) {
+  let relative = decodeURIComponent(pathname.slice("/ui/".length)) || "index.html";
+  if (relative.endsWith("/")) relative += "index.html";
+  // The codec is shared with the server so the browser encodes exactly what the board decodes.
+  const file = relative === "rla-codec.js" ? join(HERE, "rla-codec.js") : resolve(UI_DIR, relative);
+  if (relative !== "rla-codec.js" && !file.startsWith(`${UI_DIR}/`)) {
+    sendJson(res, 404, { ok: false, error: "not_found" });
+    return;
+  }
+  try {
+    const body = await readFile(file);
+    const type = UI_TYPES[file.slice(file.lastIndexOf("."))] || "application/octet-stream";
+    res.writeHead(200, {
+      "content-type": type,
+      "cache-control": "no-cache",
+      "content-security-policy":
+        "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; script-src 'self'"
+    });
+    res.end(body);
+  } catch {
+    sendJson(res, 404, { ok: false, error: "not_found" });
+  }
+}
+
+const PRIVATE_API = /^\/(status|settings|anim|egg)(\/|$)/;
+
+function isTrustedHost(hostHeader) {
+  let hostname = "";
+  try {
+    hostname = new URL(`http://${hostHeader || ""}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!hostname) return false;
+  if (hostname.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return true;
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) return true;
+  const machine = hostnameOfThisMac().toLowerCase();
+  if (machine && (hostname === machine || hostname === `${machine.replace(/\.local$/, "")}.local`)) return true;
+  return String(process.env.PET_BRIDGE_ALLOWED_HOSTS || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .includes(hostname);
+}
+
+function isSameOriginOrNone(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;  // curl, the menu bar app, the board
+  try {
+    return new URL(origin).host === String(req.headers.host || "");
+  } catch {
+    return false;
+  }
+}
+
+function hostnameOfThisMac() {
+  try {
+    return osHostname();
+  } catch {
+    return "";
+  }
+}
+
+function clientAddress(req) {
+  const address = String(req.socket?.remoteAddress || "unknown");
+  return address.startsWith("::ffff:") ? address.slice(7) : address;
+}
+
+async function readPackageVersion() {
+  try {
+    const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    return String(pkg.version || "");
+  } catch {
+    return "";
   }
 }
 
