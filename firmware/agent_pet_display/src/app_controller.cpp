@@ -1,229 +1,322 @@
 #include "app_controller.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 
 #include "app_config.h"
 #include "battery_monitor.h"
-#include "button_actions.h"
 #include "bridge_client.h"
+#include "button_actions.h"
+#include "device_settings.h"
+#include "egg_player.h"
 #include "environment_monitor.h"
+#include "firmware_version.h"
 #include "focus_controller.h"
 #include "models.h"
+#include "net_worker.h"
 #include "pet_state_machine.h"
 #include "screen_renderer.h"
 
 namespace {
 
 ScreenRenderer gRenderer;
+DeviceSettingsState gSettings;
 AgentState gAgent;
 PowerState gPower;
 EnvironmentState gEnvironment;
 NetworkState gNetwork;
-ScreenPage gPage = ScreenPage::Overview;
-uint32_t gLastBridgePoll = 0;
-uint32_t gLastBatterySample = 0;
-uint32_t gLastEnvironmentSample = 0;
-uint32_t gLastPageToggleAt = 0;
-uint32_t gLastAgentFocusAt = 0;
-uint32_t gLastWifiReconnect = 0;
-uint32_t gLastWifiReport = 0;
-uint32_t gWifiReconnectAttempts = 0;
-wl_status_t gLastWifiStatus = WL_IDLE_STATUS;
-bool gClockSyncAttempted = false;
-ButtonGestureState gBootButton;
-ButtonGestureState gAgentFocusButton;
+NetSnapshot gSnapshot;
 FocusRequestState gFocusRequest;
+ButtonGestureState gBootButton;
+ButtonGestureState gKeyButton;
+ChordGestureState gEggChord;
 
-void togglePage(uint32_t now) {
-  if (now - gLastPageToggleAt < kPageToggleDebounceMs) {
+uint32_t gLastClockSample = 0;
+uint32_t gLastClimateSample = 0;
+uint32_t gLastBatterySample = 0;
+uint32_t gLastRender = 0;
+uint32_t gLastTelemetry = 0;
+uint32_t gLastPollSeen = 0;
+uint32_t gLastRtcWrite = 0;
+bool gRtcWrittenThisBoot = false;
+bool gSettingsDirty = false;
+uint32_t gSettingsChangedAt = 0;
+bool gForceRender = true;
+
+uint32_t gEggRequest = 0;       // counter sent to the bridge
+uint32_t gEggRequestedAt = 0;   // waiting for the bridge to answer
+uint32_t gLastEggRev = 0;       // last egg command we started
+bool gEggWasActive = false;
+
+void markSettingsDirty(uint32_t now) {
+  gSettingsDirty = true;
+  gSettingsChangedAt = now;
+}
+
+void saveSettingsIfDue(uint32_t now) {
+  if (gSettingsDirty && now - gSettingsChangedAt >= kSettingsSaveDelayMs) {
+    saveDeviceSettings(gSettings);
+    gSettingsDirty = false;
+    Serial.println("[CFG] saved");
+  }
+}
+
+void setPage(ScreenPage page, uint32_t now) {
+  if (gSettings.page == page) {
     return;
   }
-  gPage = nextScreenPage(gPage);
-  gLastPageToggleAt = now;
-  Serial.printf("[UI] page=%d\n", static_cast<int>(gPage));
+  gSettings.page = page;
+  markSettingsDirty(now);
+  gForceRender = true;
+  Serial.printf("[UI] page=%s\n", screenPageName(page));
 }
 
 void cycleAgentFocus(uint32_t now) {
-  if (now - gLastAgentFocusAt < kPageToggleDebounceMs) {
-    return;
-  }
   advanceFocusSelection(gFocusRequest, gAgent, now, kFocusAutoReturnMs);
-  gLastAgentFocusAt = now;
-  Serial.printf("[UI] focus=%s index=%d count=%d id=%s\n",
+  netWorkerSetFocus(gFocusRequest);
+  gForceRender = true;
+  Serial.printf("[UI] focus=%s index=%d count=%d\n",
                 gFocusRequest.mode == LocalFocusMode::Pinned ? "pinned" : "auto",
                 gFocusRequest.visibleIndex,
-                gFocusRequest.visibleCount,
-                gFocusRequest.focusId.c_str());
+                gFocusRequest.visibleCount);
 }
 
-void handleButtonAction(ButtonUiAction action, uint32_t now) {
-  if (action == ButtonUiAction::Page) {
-    togglePage(now);
+void requestEgg(uint32_t now) {
+  gEggRequest += 1;
+  gEggRequestedAt = now;
+  netWorkerSetFastPoll(true);
+  Serial.printf("[EGG] requested #%lu\n", static_cast<unsigned long>(gEggRequest));
+}
+
+void handleAction(ButtonUiAction action, uint32_t now) {
+  if (action == ButtonUiAction::None) {
     return;
   }
-  if (action == ButtonUiAction::AgentFocus) {
-    cycleAgentFocus(now);
+  if (eggActive()) {
+    // Any button stops the show.
+    eggStop();
+    return;
+  }
+  switch (contextualAction(action, gSettings.page)) {
+    case ButtonUiAction::Page:
+      setPage(nextScreenPage(gSettings.page), now);
+      break;
+    case ButtonUiAction::AgentFocus:
+      cycleAgentFocus(now);
+      break;
+    case ButtonUiAction::ClockStyle:
+      gSettings.display.clockStyle = nextClockStyle(gSettings.display.clockStyle);
+      markSettingsDirty(now);
+      gForceRender = true;
+      Serial.printf("[UI] clock=%s\n", clockStyleName(gSettings.display.clockStyle));
+      break;
+    case ButtonUiAction::Egg:
+      requestEgg(now);
+      break;
+    default:
+      break;
+  }
+}
+
+void readButtons(uint32_t now) {
+  const bool bootPressed = digitalRead(kBootButtonPin) == LOW;
+  const bool keyPressed = digitalRead(kAgentFocusButtonPin) == LOW;
+
+  const ButtonUiAction bootAction = updateButtonGestureEx(gBootButton,
+                                                          bootPressed,
+                                                          now,
+                                                          kButtonLongPressMs,
+                                                          kButtonVeryLongPressMs,
+                                                          ButtonUiAction::Page,
+                                                          ButtonUiAction::AgentFocus,
+                                                          ButtonUiAction::Egg);
+  const ButtonUiAction keyAction = updateButtonGestureEx(gKeyButton,
+                                                         keyPressed,
+                                                         now,
+                                                         kButtonLongPressMs,
+                                                         0,
+                                                         ButtonUiAction::AgentFocus,
+                                                         ButtonUiAction::AgentFocus,
+                                                         ButtonUiAction::None);
+  const bool chordFired =
+      updateChordGesture(gEggChord, gBootButton, gKeyButton, bootPressed, keyPressed, now, kEggChordHoldMs);
+  if (chordFired) {
+    handleAction(ButtonUiAction::Egg, now);
+    return;
+  }
+  if (gEggChord.active) {
+    return;  // both buttons are down: single-button gestures are swallowed
+  }
+  handleAction(bootAction, now);
+  handleAction(keyAction, now);
+}
+
+void sampleSensors(uint32_t now) {
+  if (gLastClockSample == 0 || now - gLastClockSample >= kClockSampleMs) {
+    const int previousSecond = gEnvironment.second;
+    sampleClock(gEnvironment, gSettings.tz.c_str());
+    if (gEnvironment.second != previousSecond) {
+      gForceRender = true;
+    }
+    gLastClockSample = now;
+  }
+  if (gLastClimateSample == 0 || now - gLastClimateSample >= kClimateSampleMs) {
+    sampleClimate(gEnvironment);
+    gLastClimateSample = now;
+  }
+  if (gLastBatterySample == 0 || now - gLastBatterySample >= kBatterySampleMs) {
+    gPower = samplePowerState(false);
+    gLastBatterySample = now;
+  }
+  // SNTP sets the system clock asynchronously; mirror it into the RTC now and then.
+  if (systemClockPlausible() && (!gRtcWrittenThisBoot || now - gLastRtcWrite >= kRtcResyncMs)) {
+    if (writeRtcFromSystemClock()) {
+      gRtcWrittenThisBoot = true;
+      gLastRtcWrite = now;
+      Serial.println("[TIME] RTC synced from NTP (UTC)");
+    }
+  }
+}
+
+void applyBridge(uint32_t now) {
+  if (!netWorkerSnapshot(gSnapshot)) {
+    return;
+  }
+  gNetwork = gSnapshot.network;
+  if (gSnapshot.pollSeq == gLastPollSeen) {
+    if (!gNetwork.wifiConnected) {
+      gAgent.connected = false;
+    }
+    return;
+  }
+  gLastPollSeen = gSnapshot.pollSeq;
+  gAgent = gSnapshot.agent;
+  gForceRender = true;
+  if (!gSnapshot.lastPollOk) {
+    return;
+  }
+  syncFocusSelectionFromBridge(gFocusRequest, gAgent, now, kFocusAutoReturnMs);
+  netWorkerSetFocus(gFocusRequest);
+
+  const BridgeCommands& commands = gSnapshot.commands;
+  if (applyDisplayCommand(gSettings, commands.display)) {
+    markSettingsDirty(now);
+    Serial.printf("[CFG] from bridge rev=%lu clock=%s page=%s\n",
+                  static_cast<unsigned long>(gSettings.displayRev),
+                  clockStyleName(gSettings.display.clockStyle),
+                  screenPageName(gSettings.page));
+  }
+  if (commands.hasTz && applyTzCommand(gSettings, commands.tz)) {
+    markSettingsDirty(now);
+    Serial.printf("[TIME] tz=%s\n", gSettings.tz.c_str());
+  }
+  if (commands.egg.present && commands.egg.rev != gLastEggRev) {
+    gLastEggRev = commands.egg.rev;
+    gEggRequestedAt = 0;
+    netWorkerSetFastPoll(false);
+    eggStartStream(commands.egg, gSnapshot, now);
+  }
+}
+
+void updateTelemetry(uint32_t now) {
+  if (gLastTelemetry != 0 && now - gLastTelemetry < 1000) {
+    return;
+  }
+  gLastTelemetry = now;
+  DeviceTelemetry telemetry{};
+  telemetry.firmware = kFirmwareVersion;
+  telemetry.batteryValid = gPower.sampleOk;
+  telemetry.batteryPercent = gPower.percent;
+  telemetry.batteryMv = gPower.voltageMv;
+  telemetry.charging = gPower.charging;
+  telemetry.climateValid = gEnvironment.climateValid;
+  telemetry.temperatureC = gEnvironment.temperatureC;
+  telemetry.humidityPct = gEnvironment.humidityPct;
+  telemetry.rssi = gNetwork.wifiConnected ? gNetwork.rssi : 0;
+  telemetry.uptimeS = now / 1000;
+  telemetry.page = gSettings.page;
+  telemetry.clockStyle = gSettings.display.clockStyle;
+  telemetry.settingsRev = gSettings.displayRev;
+  telemetry.eggRev = gLastEggRev;
+  telemetry.freeHeap = ESP.getFreeHeap();
+  telemetry.timeValid = gEnvironment.clockValid;
+  telemetry.eggRequest = gEggRequest;
+  netWorkerSetTelemetry(telemetry);
+}
+
+void checkEggRequestTimeout(uint32_t now) {
+  // The bridge had ~3 s to announce an animation; otherwise play the built-in one.
+  if (gEggRequestedAt != 0 && now - gEggRequestedAt > 3000) {
+    gEggRequestedAt = 0;
+    netWorkerSetFastPoll(false);
+    if (!eggActive()) {
+      eggStartBuiltin(now);
+    }
   }
 }
 
 }  // namespace
 
 void AppController::begin() {
+  loadDeviceSettings(gSettings);
   gRenderer.begin();
   gAgent.connected = false;
   gPower = derivePowerState(3800, false);
   beginEnvironmentMonitor();
+  if (!gSettings.rtcIsUtc) {
+    const bool migrated = migrateLegacyRtcToUtc();
+    gSettings.rtcIsUtc = true;
+    saveDeviceSettings(gSettings);
+    Serial.printf("[TIME] RTC convention -> UTC (%s)\n", migrated ? "converted from CST" : "nothing to convert");
+  }
   pinMode(kBootButtonPin, INPUT_PULLUP);
   pinMode(kAgentFocusButtonPin, INPUT_PULLUP);
+  Serial.printf("[BOOT] firmware=%s\n", kFirmwareVersion);
   Serial.printf("[BOOT] WiFi SSID=%s\n", kWifiSsid);
-  Serial.printf("[BOOT] Bridge URL=%s\n", kBridgeUrl);
-  WiFi.mode(WIFI_STA);
-  WiFi.persistent(false);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(kWifiSsid, kWifiPassword);
+  Serial.printf("[BOOT] Bridge URL=%s\n", redactUrlToken(kBridgeUrl).c_str());
+  Serial.printf("[BOOT] page=%s clock=%s tz=%s\n",
+                screenPageName(gSettings.page),
+                clockStyleName(gSettings.display.clockStyle),
+                gSettings.tz.empty() ? "(default)" : gSettings.tz.c_str());
+  netWorkerBegin(kWifiSsid, kWifiPassword, kBridgeUrl);
+  netWorkerSetFocus(gFocusRequest);
 }
 
 void AppController::tick() {
   const uint32_t now = millis();
-  const wl_status_t wifiStatus = WiFi.status();
-  const bool wifiConnected = wifiStatus == WL_CONNECTED;
-  const bool wifiConnecting =
-      wifiStatus == WL_IDLE_STATUS || wifiStatus == WL_DISCONNECTED || wifiStatus == WL_SCAN_COMPLETED;
-  const bool bootPressed = digitalRead(kBootButtonPin) == LOW;
-  const bool agentFocusPressed = digitalRead(kAgentFocusButtonPin) == LOW;
 
-  gNetwork.wifiKnown = true;
-  gNetwork.wifiConnected = wifiConnected;
-  gNetwork.wifiConnecting = wifiConnecting && !wifiConnected;
-  gNetwork.wifiStatusCode = static_cast<int>(wifiStatus);
-  gNetwork.reconnectAttempts = gWifiReconnectAttempts;
-  if (wifiConnected) {
-    gNetwork.rssi = WiFi.RSSI();
-    gNetwork.ip = WiFi.localIP().toString().c_str();
-  } else {
-    gNetwork.rssi = 0;
-    gNetwork.ip.clear();
-    gAgent.connected = false;
-  }
+  readButtons(now);
+  applyBridge(now);
+  sampleSensors(now);
+  updateTelemetry(now);
+  checkEggRequestTimeout(now);
+  saveSettingsIfDue(now);
 
+  const LocalFocusMode focusBefore = gFocusRequest.mode;
   expireFocusIfNeeded(gFocusRequest, now);
-  handleButtonAction(updateButtonGesture(gBootButton,
-                                         bootPressed,
-                                         now,
-                                         kPageToggleDebounceMs,
-                                         kButtonLongPressMs,
-                                         ButtonUiAction::Page,
-                                         ButtonUiAction::AgentFocus),
-                     now);
-  handleButtonAction(updateButtonGesture(gAgentFocusButton,
-                                         agentFocusPressed,
-                                         now,
-                                         kPageToggleDebounceMs,
-                                         kButtonLongPressMs,
-                                         ButtonUiAction::AgentFocus,
-                                         ButtonUiAction::AgentFocus),
-                     now);
-
-  if (wifiStatus != gLastWifiStatus) {
-    if (wifiConnected) {
-      Serial.printf("[WIFI] connected ip=%s\n", WiFi.localIP().toString().c_str());
-      Serial.printf("[WIFI] rssi=%d dBm\n", WiFi.RSSI());
-      gClockSyncAttempted = false;
-      gWifiReconnectAttempts = 0;
-    } else {
-      Serial.printf("[WIFI] status=%d\n", static_cast<int>(wifiStatus));
-    }
-    gLastWifiStatus = wifiStatus;
+  if (focusBefore != gFocusRequest.mode) {
+    netWorkerSetFocus(gFocusRequest);  // pinned agent timed out back to AUTO
+    gForceRender = true;
   }
 
-  if (!wifiConnected && now - gLastWifiReconnect >= kWifiReconnectMs) {
-    gWifiReconnectAttempts += 1;
-    Serial.printf("[WIFI] reconnect attempt=%lu status=%d\n",
-                  static_cast<unsigned long>(gWifiReconnectAttempts),
-                  static_cast<int>(wifiStatus));
-    WiFi.disconnect(false);
-    WiFi.begin(kWifiSsid, kWifiPassword);
-    gLastWifiReconnect = now;
+  U8G2* panel = gRenderer.u8g2();
+  if (eggActive() && panel) {
+    eggTick(*panel, now);
+    gEggWasActive = true;
+    delay(2);
+    return;
+  }
+  if (gEggWasActive) {
+    gEggWasActive = false;
+    gRenderer.invalidate();
+    gForceRender = true;
   }
 
-  if (now - gLastWifiReport >= kWifiReportMs) {
-    if (wifiConnected) {
-      Serial.printf("[WIFI] ok ip=%s rssi=%d dBm\n",
-                    WiFi.localIP().toString().c_str(),
-                    WiFi.RSSI());
-    } else {
-      Serial.printf("[WIFI] waiting status=%d attempts=%lu\n",
-                    static_cast<int>(wifiStatus),
-                    static_cast<unsigned long>(gWifiReconnectAttempts));
-    }
-    gLastWifiReport = now;
+  if (gForceRender || now - gLastRender >= kRenderIntervalMs) {
+    const DisplayState view =
+        deriveDisplayState(gAgent, gPower, gEnvironment, gSettings.page, gNetwork, gSettings.display);
+    gRenderer.render(view, gPower);
+    gLastRender = now;
+    gForceRender = false;
   }
-
-  if (wifiConnected && now - gLastBridgePoll >= kBridgePollMs) {
-    AgentState next{};
-    const std::string pollUrl = buildFocusedPollUrl(kBridgeUrl, gFocusRequest);
-    if (fetchAgentState(pollUrl.c_str(), next)) {
-      gAgent = next;
-      gNetwork.wifiKnown = true;
-      gNetwork.wifiConnected = true;
-      gNetwork.wifiConnecting = false;
-      gNetwork.wifiStatusCode = static_cast<int>(wifiStatus);
-      gNetwork.rssi = WiFi.RSSI();
-      gNetwork.ip = WiFi.localIP().toString().c_str();
-      syncFocusSelectionFromBridge(gFocusRequest, gAgent, now, kFocusAutoReturnMs);
-      Serial.printf("[BRIDGE] ok source=%d status=%d focus=%s index=%d count=%d task=%s\n",
-                    static_cast<int>(gAgent.source),
-                    static_cast<int>(gAgent.status),
-                    gFocusRequest.mode == LocalFocusMode::Pinned ? "pinned" : "auto",
-                    gFocusRequest.visibleIndex,
-                    gFocusRequest.visibleCount,
-                    gAgent.task.c_str());
-    } else {
-      gAgent.connected = false;
-      Serial.printf("[BRIDGE] fetch failed wifi_ip=%s rssi=%d\n",
-                    WiFi.localIP().toString().c_str(),
-                    WiFi.RSSI());
-    }
-    gLastBridgePoll = now;
-  }
-
-  if (now - gLastBatterySample >= kBatterySampleMs) {
-    gPower = samplePowerState(false);
-    Serial.printf("[POWER] sample_ok=%d battery=%d%% voltage=%dmV low=%d charging=%d\n",
-                  gPower.sampleOk ? 1 : 0,
-                  gPower.percent,
-                  gPower.voltageMv,
-                  gPower.lowBattery ? 1 : 0,
-                  gPower.charging ? 1 : 0);
-    gLastBatterySample = now;
-  }
-
-  if (now - gLastEnvironmentSample >= kEnvironmentSampleMs) {
-    gEnvironment = sampleEnvironmentState();
-    if (wifiConnected && !gEnvironment.clockValid && !gClockSyncAttempted) {
-      gClockSyncAttempted = true;
-      if (syncEnvironmentClockFromNtp()) {
-        Serial.println("[ENV] RTC synced from NTP");
-        gEnvironment = sampleEnvironmentState();
-      } else {
-        Serial.println("[ENV] RTC sync failed");
-      }
-    }
-    Serial.printf("[ENV] clock=%d %04d/%02d/%02d %02d:%02d temp=%.1fC humidity=%.0f%% climate=%d\n",
-                  gEnvironment.clockValid ? 1 : 0,
-                  gEnvironment.year,
-                  gEnvironment.month,
-                  gEnvironment.day,
-                  gEnvironment.hour,
-                  gEnvironment.minute,
-                  static_cast<double>(gEnvironment.temperatureC),
-                  static_cast<double>(gEnvironment.humidityPct),
-                  gEnvironment.climateValid ? 1 : 0);
-    gLastEnvironmentSample = now;
-  }
-
-  const DisplayState view = deriveDisplayState(gAgent, gPower, gEnvironment, gPage, gNetwork);
-  gRenderer.render(view, gPower);
-  delay(100);
+  delay(15);
 }

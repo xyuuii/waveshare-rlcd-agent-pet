@@ -428,7 +428,7 @@ void ScreenRenderer::render(const DisplayState& display, const PowerState& power
                58,
                footerY + 7,
                clipDotoTextToPixelWidth(display.footerMessage, 260, DotoFontSize::Small));
-  char pageLabel[8];
+  char pageLabel[16];
   snprintf(pageLabel, sizeof(pageLabel), "P%d/%d", screenPageNumber(display.page), kScreenPageCount);
   drawDotoText(DotoFontSize::Small, 338, footerY + 7, pageLabel);
   flushIfChanged();

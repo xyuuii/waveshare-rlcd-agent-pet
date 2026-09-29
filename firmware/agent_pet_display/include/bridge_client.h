@@ -57,6 +57,7 @@ struct DeviceTelemetry {
   uint32_t eggRev{0};
   uint32_t freeHeap{0};
   bool timeValid{false};
+  uint32_t eggRequest{0};  // bumps when the secret gesture asks the bridge for its easter egg
 };
 
 bool parseAgentStatePayload(const char* json, AgentState& outState);
@@ -67,6 +68,11 @@ const char* screenPageName(ScreenPage page);
 bool screenPageFromName(const char* name, ScreenPage& out);
 // "&fw=1.3.0&bat=84&..." (leading '&', values URL-safe).
 std::string buildTelemetryQuery(const DeviceTelemetry& telemetry);
+// ".../esp32/poll?token=x" -> ".../esp32/anim/<id>/frames?token=x&start=..&count=..&max_bytes=.."
+std::string buildAnimChunkUrl(const char* pollUrl, const std::string& id, uint32_t start, uint32_t count,
+                              uint32_t maxBytes);
+// Hides the token query value for logs.
+std::string redactUrlToken(const char* url);
 
 bool fetchAgentState(const char* url, AgentState& outState);
 // Fetch with explicit timeouts and command parsing; used by the network task.

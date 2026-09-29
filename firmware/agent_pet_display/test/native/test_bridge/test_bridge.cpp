@@ -430,6 +430,33 @@ void test_page_names_round_trip(void) {
   TEST_ASSERT_FALSE(screenPageFromName(nullptr, page));
 }
 
+
+void test_anim_chunk_url_keeps_token_and_encodes_id(void) {
+  const std::string url = buildAnimChunkUrl("http://192.168.1.204:17366/esp32/poll?token=abc123", "bad apple", 120, 60,
+                                            16384);
+  TEST_ASSERT_EQUAL_STRING(
+      "http://192.168.1.204:17366/esp32/anim/bad%20apple/frames?token=abc123&start=120&count=60&max_bytes=16384",
+      url.c_str());
+  TEST_ASSERT_EQUAL_STRING("http://h:1/esp32/anim/demo/frames?start=0&count=1&max_bytes=10",
+                           buildAnimChunkUrl("http://h:1/esp32/poll", "demo", 0, 1, 10).c_str());
+  TEST_ASSERT_EQUAL_STRING("", buildAnimChunkUrl("http://h:1/other", "demo", 0, 1, 10).c_str());
+}
+
+void test_redact_url_token(void) {
+  TEST_ASSERT_EQUAL_STRING("http://h/esp32/poll?token=***",
+                           redactUrlToken("http://h/esp32/poll?token=s3cr3t").c_str());
+  TEST_ASSERT_EQUAL_STRING("http://h/p?focus=auto&token=***&x=1",
+                           redactUrlToken("http://h/p?focus=auto&token=abc&x=1").c_str());
+  TEST_ASSERT_EQUAL_STRING("http://h/p", redactUrlToken("http://h/p").c_str());
+}
+
+void test_egg_request_is_reported_only_when_set(void) {
+  DeviceTelemetry t{};
+  TEST_ASSERT_TRUE(buildTelemetryQuery(t).find("eggreq") == std::string::npos);
+  t.eggRequest = 3;
+  TEST_ASSERT_TRUE(buildTelemetryQuery(t).find("&eggreq=3") != std::string::npos);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_parse_running_codex_payload);
@@ -457,5 +484,8 @@ int main(void) {
   RUN_TEST(test_legacy_payload_has_no_commands);
   RUN_TEST(test_telemetry_query_is_compact_and_url_safe);
   RUN_TEST(test_page_names_round_trip);
+  RUN_TEST(test_anim_chunk_url_keeps_token_and_encodes_id);
+  RUN_TEST(test_redact_url_token);
+  RUN_TEST(test_egg_request_is_reported_only_when_set);
   return UNITY_END();
 }

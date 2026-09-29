@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "egg_builtin.h"
 #include "host_frame.h"
 #include "models.h"
 #include "pet_state_machine.h"
@@ -174,5 +175,18 @@ int main(int argc, char** argv) {
     }
     printf("wrote %s\n", path.c_str());
   }
+  // Easter egg screens are drawn straight into the panel buffer.
+  U8G2* panel = renderer.u8g2();
+  const uint32_t eggTimes[] = {400, 2600, 6100, 10500};
+  for (uint32_t at : eggTimes) {
+    drawBuiltinEggFrame(*panel, at);
+    const std::string path = outDir + "/egg-builtin-" + std::to_string(at) + "ms.pbm";
+    failures += hostWritePanelPbm(path) ? 0 : 1;
+    printf("wrote %s\n", path.c_str());
+  }
+  drawEggCountdown(*panel, "badapple", 3);
+  failures += hostWritePanelPbm(outDir + "/egg-countdown.pbm") ? 0 : 1;
+  drawEggMessage(*panel, "STREAM STALLED", "CHECK THE BRIDGE / WIFI");
+  failures += hostWritePanelPbm(outDir + "/egg-message.pbm") ? 0 : 1;
   return failures == 0 ? 0 : 1;
 }

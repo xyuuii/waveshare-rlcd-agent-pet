@@ -1,10 +1,12 @@
 #include "environment_monitor.h"
 
+#include "time_keeper.h"
+
 #ifdef ARDUINO
 
 #include <Arduino.h>
-#include <time.h>
 #include <Wire.h>
+#include <time.h>
 
 #include "SensorPCF85063.hpp"
 
@@ -50,26 +52,31 @@ uint8_t shtc3Crc(const uint8_t* data, size_t length) {
   return crc;
 }
 
-bool sampleClimate(float& temperatureC, float& humidityPct) {
-  writeShtc3Command(kShtc3WakeupCommand);
-  delay(2);
-  writeShtc3Command(kShtc3MeasurePollingCommand);
-  delay(20);
-
-  uint8_t bytes[6] = {0};
-  if (!readShtc3Bytes(bytes, sizeof(bytes))) {
+bool readRtcFields(CivilTime& out) {
+  if (!gEnvironmentReady) {
     return false;
   }
-  if (shtc3Crc(bytes, 2) != bytes[2] || shtc3Crc(bytes + 3, 2) != bytes[5]) {
-    return false;
-  }
+  RTC_DateTime rtc = gRtc.getDateTime();
+  out.year = rtc.getYear();
+  out.month = rtc.getMonth();
+  out.day = rtc.getDay();
+  out.hour = rtc.getHour();
+  out.minute = rtc.getMinute();
+  out.second = rtc.getSecond();
+  out.weekday = rtc.getWeek();
+  return out.year >= 2024 && out.month >= 1 && out.month <= 12 && out.day >= 1 && out.day <= 31 &&
+         out.hour < 24 && out.minute < 60 && out.second < 60;
+}
 
-  const uint16_t rawTemperature = static_cast<uint16_t>((bytes[0] << 8) | bytes[1]);
-  const uint16_t rawHumidity = static_cast<uint16_t>((bytes[3] << 8) | bytes[4]);
-  temperatureC = 175.0f * static_cast<float>(rawTemperature) / 65536.0f - 45.0f -
-                 kShtc3TemperatureOffsetC;
-  humidityPct = 100.0f * static_cast<float>(rawHumidity) / 65536.0f;
-  return true;
+void writeRtcEpoch(int64_t epoch) {
+  const CivilTime utc = civilUtcFromEpoch(epoch);
+  gRtc.setDateTime(RTC_DateTime(static_cast<uint16_t>(utc.year),
+                                static_cast<uint8_t>(utc.month),
+                                static_cast<uint8_t>(utc.day),
+                                static_cast<uint8_t>(utc.hour),
+                                static_cast<uint8_t>(utc.minute),
+                                static_cast<uint8_t>(utc.second),
+                                static_cast<uint8_t>(utc.weekday)));
 }
 
 }  // namespace
@@ -78,7 +85,6 @@ void beginEnvironmentMonitor() {
   if (gEnvironmentReady) {
     return;
   }
-
   if (!gRtc.begin(Wire, kEnvI2cSdaPin, kEnvI2cSclPin)) {
     return;
   }
@@ -89,44 +95,72 @@ void beginEnvironmentMonitor() {
   gEnvironmentReady = true;
 }
 
-EnvironmentState sampleEnvironmentState() {
-  EnvironmentState state{};
-  if (!gEnvironmentReady) {
-    return state;
+bool migrateLegacyRtcToUtc() {
+  CivilTime fields{};
+  if (!readRtcFields(fields)) {
+    return false;
   }
-
-  const RTC_DateTime rtc = gRtc.getDateTime();
-  state.year = rtc.getYear();
-  state.month = rtc.getMonth();
-  state.day = rtc.getDay();
-  state.hour = rtc.getHour();
-  state.minute = rtc.getMinute();
-  state.second = rtc.getSecond();
-  state.weekday = rtc.getWeek();
-  state.clockValid = state.year >= 2024 && state.month > 0 && state.day > 0;
-
-  float temperatureC = 0.0f;
-  float humidityPct = 0.0f;
-  if (sampleClimate(temperatureC, humidityPct)) {
-    state.temperatureC = temperatureC;
-    state.humidityPct = humidityPct;
-    state.climateValid = true;
-  }
-
-  return state;
+  writeRtcEpoch(legacyRtcToUtc(fields));
+  return true;
 }
 
-bool syncEnvironmentClockFromNtp() {
-  if (!gEnvironmentReady) {
-    return false;
+void sampleClock(EnvironmentState& state, const char* posixTz) {
+  state.clockValid = false;
+  int64_t epoch = 0;
+  CivilTime utc{};
+  if (readRtcFields(utc)) {
+    epoch = epochFromCivilUtc(utc);
   }
+  if (!isPlausibleEpoch(epoch) && systemClockPlausible()) {
+    epoch = static_cast<int64_t>(time(nullptr));
+  }
+  CivilTime local{};
+  if (!localTimeFromEpoch(epoch, posixTz, local)) {
+    return;
+  }
+  state.year = local.year;
+  state.month = local.month;
+  state.day = local.day;
+  state.hour = local.hour;
+  state.minute = local.minute;
+  state.second = local.second;
+  state.weekday = local.weekday;
+  state.clockValid = true;
+}
 
-  configTzTime("CST-8", "pool.ntp.org", "ntp.aliyun.com", "time.cloudflare.com");
-  struct tm timeInfo = {};
-  if (!getLocalTime(&timeInfo, 5000)) {
+void sampleClimate(EnvironmentState& state) {
+  state.climateValid = false;
+  if (!gEnvironmentReady) {
+    return;
+  }
+  writeShtc3Command(kShtc3WakeupCommand);
+  delay(2);
+  writeShtc3Command(kShtc3MeasurePollingCommand);
+  delay(20);
+
+  uint8_t bytes[6] = {0};
+  if (!readShtc3Bytes(bytes, sizeof(bytes))) {
+    return;
+  }
+  if (shtc3Crc(bytes, 2) != bytes[2] || shtc3Crc(bytes + 3, 2) != bytes[5]) {
+    return;
+  }
+  const uint16_t rawTemperature = static_cast<uint16_t>((bytes[0] << 8) | bytes[1]);
+  const uint16_t rawHumidity = static_cast<uint16_t>((bytes[3] << 8) | bytes[4]);
+  state.temperatureC = 175.0f * static_cast<float>(rawTemperature) / 65536.0f - 45.0f - kShtc3TemperatureOffsetC;
+  state.humidityPct = 100.0f * static_cast<float>(rawHumidity) / 65536.0f;
+  state.climateValid = true;
+}
+
+bool systemClockPlausible() {
+  return isPlausibleEpoch(static_cast<int64_t>(time(nullptr)));
+}
+
+bool writeRtcFromSystemClock() {
+  if (!gEnvironmentReady || !systemClockPlausible()) {
     return false;
   }
-  gRtc.setDateTime(RTC_DateTime(timeInfo));
+  writeRtcEpoch(static_cast<int64_t>(time(nullptr)));
   return true;
 }
 
@@ -134,11 +168,24 @@ bool syncEnvironmentClockFromNtp() {
 
 void beginEnvironmentMonitor() {}
 
-EnvironmentState sampleEnvironmentState() {
-  return EnvironmentState{};
+bool migrateLegacyRtcToUtc() {
+  return false;
 }
 
-bool syncEnvironmentClockFromNtp() {
+void sampleClock(EnvironmentState& state, const char* posixTz) {
+  (void)posixTz;
+  state.clockValid = false;
+}
+
+void sampleClimate(EnvironmentState& state) {
+  state.climateValid = false;
+}
+
+bool systemClockPlausible() {
+  return false;
+}
+
+bool writeRtcFromSystemClock() {
   return false;
 }
 

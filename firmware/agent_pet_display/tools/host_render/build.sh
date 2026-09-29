@@ -46,7 +46,7 @@ FW_SOURCES=(
   "$FW/src/usage_visuals.cpp"
   "$FW/src/pet_state_machine.cpp"
 )
-for optional in clock_model.cpp clock_faces.cpp anim_codec.cpp egg_player_render.cpp; do
+for optional in clock_model.cpp clock_faces.cpp anim_codec.cpp egg_builtin.cpp; do
   if [[ -f "$FW/src/$optional" ]]; then
     FW_SOURCES+=("$FW/src/$optional")
   fi

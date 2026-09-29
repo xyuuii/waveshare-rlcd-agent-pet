@@ -13,3 +13,6 @@ bridge/codex-pet-bridge/*.log
 
 # Local secrets
 **/.env
+
+# Firmware secrets (Wi-Fi, bridge token)
+firmware/agent_pet_display/include/secrets.h

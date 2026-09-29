@@ -877,14 +877,18 @@ void drawTerminalFace(U8G2& g, const ClockView& v, uint32_t tickMs) {
   y = 222;
   fontText(g, mono, 10, y, "pet@rlcd:~$ sensors");
   y += lineH;
+  char battery[8];
+  if (v.batteryValid) {
+    snprintf(battery, sizeof(battery), "%d%%", v.batteryPercent);
+  } else {
+    snprintf(battery, sizeof(battery), "--");
+  }
   char sensors[64];
   if (v.climateValid) {
-    snprintf(sensors, sizeof(sensors), "temp %.1fC  hum %.0f%%  bat %s",
-             static_cast<double>(v.temperatureC), static_cast<double>(v.humidityPct),
-             v.batteryValid ? (std::to_string(v.batteryPercent) + "%").c_str() : "--");
+    snprintf(sensors, sizeof(sensors), "temp %.1fC  hum %.0f%%  bat %s", static_cast<double>(v.temperatureC),
+             static_cast<double>(v.humidityPct), battery);
   } else {
-    snprintf(sensors, sizeof(sensors), "temp --  hum --  bat %s",
-             v.batteryValid ? (std::to_string(v.batteryPercent) + "%").c_str() : "--");
+    snprintf(sensors, sizeof(sensors), "temp --  hum --  bat %s", battery);
   }
   fontText(g, mono, 10, y, clipFont(g, mono, sensors, kWidth - 20).c_str());
   y += lineH;

@@ -477,6 +477,53 @@ std::string buildTelemetryQuery(const DeviceTelemetry& t) {
     appendParam(out, "heap", static_cast<long>(t.freeHeap));
   }
   appendParam(out, "clk", t.timeValid ? 1L : 0L);
+  if (t.eggRequest > 0) {
+    appendParam(out, "eggreq", static_cast<long>(t.eggRequest));
+  }
+  return out;
+}
+
+std::string buildAnimChunkUrl(const char* pollUrl, const std::string& id, uint32_t start, uint32_t count,
+                              uint32_t maxBytes) {
+  const std::string url(pollUrl ? pollUrl : "");
+  const size_t pathAt = url.find("/esp32/poll");
+  if (pathAt == std::string::npos) {
+    return "";
+  }
+  std::string out = url.substr(0, pathAt) + "/esp32/anim/";
+  std::string encodedId;
+  appendParam(encodedId, "", id.c_str());  // "&=" + encoded id
+  out += encodedId.substr(2);
+  out += "/frames?";
+  const size_t queryAt = url.find('?', pathAt);
+  std::string query;
+  if (queryAt != std::string::npos) {
+    query = url.substr(queryAt + 1);
+  }
+  std::string params;
+  appendParam(params, "start", static_cast<long>(start));
+  appendParam(params, "count", static_cast<long>(count));
+  appendParam(params, "max_bytes", static_cast<long>(maxBytes));
+  if (query.empty()) {
+    out += params.substr(1);
+  } else {
+    out += query + params;
+  }
+  return out;
+}
+
+std::string redactUrlToken(const char* url) {
+  std::string out(url ? url : "");
+  size_t at = out.find("token=");
+  while (at != std::string::npos) {
+    const size_t valueStart = at + 6;
+    size_t valueEnd = out.find('&', valueStart);
+    if (valueEnd == std::string::npos) {
+      valueEnd = out.size();
+    }
+    out.replace(valueStart, valueEnd - valueStart, "***");
+    at = out.find("token=", valueStart + 3);
+  }
   return out;
 }
 
