@@ -16,11 +16,13 @@
 #      (the token is no longer written into the plist) and restarts them
 #   5. points the Hermes hooks and the OpenClaw plugin at the new copy
 #   6. checks /health and /status
-# Every file it changes is copied to ~/.codex-pet-bridge/backup/<time>/ first.
+# Every file it changes is copied to ~/.codex-pet-bridge/backup/<time>/ first;
+# the very first run also keeps a copy in ~/.codex-pet-bridge/backup/original/.
+# Other environment variables of the old LaunchAgents are carried over.
 # The token is never printed.
 #
 # Options: --skip-launchd --skip-hermes --skip-openclaw --node /path/to/node
-set -euo pipefail
+set -Eeuo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASE="${PET_HOME:-$HOME/.codex-pet-bridge}"
@@ -39,8 +41,9 @@ OPENCLAW_LINK="$HOME/.openclaw/extensions/openclaw-pet-bridge"
 OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
 LAUNCHCTL="${LAUNCHCTL:-/bin/launchctl}"
 PLUTIL="${PLUTIL:-/usr/bin/plutil}"
-STAMP="$(date +%Y%m%d-%H%M%S)"
+STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 BACKUP="$BASE/backup/$STAMP"
+ORIGINAL="$BASE/backup/original"
 UID_NUM="$(id -u)"
 
 APPLY=0
@@ -71,7 +74,18 @@ done
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 item() { printf '  - %s\n' "$*"; }
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+rollback_hint() {
+  if [[ "$APPLY" == 1 && -d "$BACKUP" ]]; then
+    printf 'Files changed so far were saved first. To put them back:\n  %s --rollback "%s"\n' "$0" "$BACKUP" >&2
+  fi
+}
+die() {
+  printf 'error: %s\n' "$*" >&2
+  rollback_hint
+  exit 1
+}
+trap 'status=$?; if [[ $status -ne 0 ]]; then printf "error: install stopped (line %s)\n" "$LINENO" >&2; rollback_hint; fi' ERR
 
 # Runs a command with --apply, otherwise only shows it.
 act() {
@@ -87,16 +101,29 @@ plist_get() {
   "$PLUTIL" -extract "$2" raw -o - "$1" 2>/dev/null || true
 }
 
+# Saves a file's content (following symlinks, since edits go through them) in
+# this run's backup and, on the very first run, in backup/original.
 backup() {
-  local path="$1"
-  [[ -e "$path" || -L "$path" ]] || return 0
-  mkdir -p "$BACKUP"
-  chmod 700 "$BASE/backup" "$BACKUP" 2>/dev/null || true
-  if [[ -L "$path" ]]; then
-    readlink "$path" > "$BACKUP/$(basename "$path").link"
-  else
-    cp -p "$path" "$BACKUP/$(basename "$path")"
-  fi
+  local path="$1" dir
+  [[ -e "$path" ]] || return 0
+  for dir in "$BACKUP" "$ORIGINAL"; do
+    [[ "$dir" == "$ORIGINAL" && -e "$ORIGINAL/$(basename "$path")" ]] && continue
+    mkdir -p "$dir"
+    chmod 700 "$BASE/backup" "$dir" 2>/dev/null || true
+    cp -pL "$path" "$dir/$(basename "$path")"
+  done
+}
+
+# Saves where a symlink points (used for the OpenClaw plugin link).
+backup_link() {
+  local path="$1" dir
+  [[ -L "$path" ]] || return 0
+  for dir in "$BACKUP" "$ORIGINAL"; do
+    [[ "$dir" == "$ORIGINAL" && -e "$ORIGINAL/$(basename "$path").link" ]] && continue
+    mkdir -p "$dir"
+    chmod 700 "$BASE/backup" "$dir" 2>/dev/null || true
+    readlink "$path" > "$dir/$(basename "$path").link"
+  done
 }
 
 xml() {
@@ -116,9 +143,10 @@ retarget() {
 bootstrap_agent() {
   local label="$1" plist="$2" attempt
   "$LAUNCHCTL" bootout "gui/$UID_NUM/$label" 2>/dev/null || true
+  # A label disabled earlier (launchctl unload -w) refuses to bootstrap.
+  "$LAUNCHCTL" enable "gui/$UID_NUM/$label" 2>/dev/null || true
   for attempt in 1 2 3 4 5; do
     if "$LAUNCHCTL" bootstrap "gui/$UID_NUM" "$plist" 2>/dev/null; then
-      "$LAUNCHCTL" enable "gui/$UID_NUM/$label" 2>/dev/null || true
       return 0
     fi
     sleep 1
@@ -157,35 +185,86 @@ fi
 [[ "$(uname -s)" == "Darwin" || -n "${PET_INSTALL_TEST:-}" ]] || die "this installer is for macOS"
 [[ -f "$SRC/src/bridge-server.js" ]] || die "run this from the codex-pet-bridge checkout ($SRC)"
 
-if [[ -z "$NODE" ]]; then NODE="$(plist_get "$BRIDGE_PLIST" ProgramArguments.0)"; fi
-if [[ -z "$NODE" || ! -x "$NODE" ]]; then NODE="$(command -v node || true)"; fi
-[[ -n "$NODE" && -x "$NODE" ]] || die "node not found; pass --node /path/to/node"
-NODE_MAJOR="$("$NODE" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-[[ "$NODE_MAJOR" -ge 20 ]] || die "node $NODE is too old (need 20 or newer)"
+node_major() {
+  local major
+  major="$("$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  case "$major" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "$major" ;;
+  esac
+}
+NODE_MAJOR=0
+for candidate in "$NODE" "$(plist_get "$BRIDGE_PLIST" ProgramArguments.0)" "$(command -v node || true)"; do
+  [[ -n "$candidate" && -x "$candidate" ]] || continue
+  NODE_MAJOR="$(node_major "$candidate")"
+  if [[ "$NODE_MAJOR" -ge 20 ]]; then
+    NODE="$candidate"
+    break
+  fi
+done
+[[ "$NODE_MAJOR" -ge 20 ]] || die "no node 20 or newer found; pass --node /path/to/node"
 
 OLD_HOST="$(plist_get "$BRIDGE_PLIST" EnvironmentVariables.PET_BRIDGE_HOST)"
 OLD_PORT="$(plist_get "$BRIDGE_PLIST" EnvironmentVariables.PET_BRIDGE_PORT)"
 OLD_PREFIX="$(plist_get "$BRIDGE_PLIST" EnvironmentVariables.PET_AGENT_SYNC_PREFIX)"
+# The board polls over the LAN, so a fresh install listens on 0.0.0.0 (with the token).
 HOST_BIND="${PET_BRIDGE_HOST:-${OLD_HOST:-0.0.0.0}}"
 PORT="${PET_BRIDGE_PORT:-${OLD_PORT:-17366}}"
 PREFIX="${PET_AGENT_SYNC_PREFIX:-${OLD_PREFIX:-mac}}"
+origin_of() {  # env-name old-value
+  if [[ -n "${!1:-}" ]]; then echo "\$$1"; elif [[ -n "$2" ]]; then echo "old LaunchAgent"; else echo "default"; fi
+}
+
+# Environment variables of an old plist that this script does not manage
+# (webhooks, XiaoZhi settings, ...), as plist XML. Values are never printed.
+extra_env_xml() {  # plist, managed keys...
+  local plist="$1" key value
+  shift
+  [[ -f "$plist" ]] || return 0
+  "$PLUTIL" -convert json -o - "$plist" 2>/dev/null \
+    | "$NODE" -e '
+        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const skip = new Set(process.argv.slice(1));
+        for (const [key, value] of Object.entries(data.EnvironmentVariables || {})) {
+          if (skip.has(key) || typeof value !== "string" || /[\t\n]/.test(value)) continue;
+          process.stdout.write(`${key}\t${value}\n`);
+        }' "$@" \
+    | while IFS=$'\t' read -r key value; do
+        printf '    <key>%s</key>\n    <string>%s</string>\n' "$(xml "$key")" "$(xml "$value")"
+      done || true
+}
+extra_env_names() {
+  printf '%s' "$1" | sed -n 's#.*<key>\(.*\)</key>.*#\1#p' | paste -sd ' ' -
+}
+BRIDGE_EXTRA="$(extra_env_xml "$BRIDGE_PLIST" PATH PET_BRIDGE_HOST PET_BRIDGE_PORT PET_BRIDGE_TOKEN PET_BRIDGE_TOKEN_FILE \
+  PET_BRIDGE_LOG PET_BRIDGE_STATE PET_AGENT_SYNC_PREFIX)"
+SYNC_EXTRA="$(extra_env_xml "$SYNC_PLIST" PATH PET_AGENT_SYNC_PREFIX PET_BRIDGE_URL PET_BRIDGE_TOKEN PET_BRIDGE_TOKEN_FILE)"
 
 # Where the old LaunchAgent kept its event log. ~/Documents may have moved
 # into iCloud Drive, which is exactly what broke the old setup.
-OLD_WORKDIR="$(plist_get "$BRIDGE_PLIST" WorkingDirectory)"
-OLD_STATE_DIR=""
-if [[ -n "$OLD_WORKDIR" ]]; then
-  if [[ -d "$OLD_WORKDIR" ]]; then
-    OLD_STATE_DIR="$OLD_WORKDIR"
-  else
-    case "$OLD_WORKDIR" in
-      "$HOME/Documents/"*)
-        candidate="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents/${OLD_WORKDIR#"$HOME/Documents/"}"
-        [[ -d "$candidate" ]] && OLD_STATE_DIR="$candidate"
-        ;;
-    esac
+relocated() {  # a path under ~/Documents that may now live in iCloud Drive
+  local path="$1" candidate
+  if [[ -e "$path" ]]; then
+    printf '%s' "$path"
+    return 0
   fi
-fi
+  case "$path" in
+    "$HOME/Documents/"*)
+      candidate="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents/${path#"$HOME/Documents/"}"
+      [[ -e "$candidate" ]] && printf '%s' "$candidate"
+      ;;
+  esac
+  return 0
+}
+OLD_WORKDIR="$(plist_get "$BRIDGE_PLIST" WorkingDirectory)"
+OLD_LOG="$(plist_get "$BRIDGE_PLIST" EnvironmentVariables.PET_BRIDGE_LOG)"
+OLD_STATE_FILE="$(plist_get "$BRIDGE_PLIST" EnvironmentVariables.PET_BRIDGE_STATE)"
+OLD_STATE_DIR=""
+[[ -n "$OLD_WORKDIR" ]] && OLD_STATE_DIR="$(relocated "$OLD_WORKDIR")"
+if [[ -z "$OLD_LOG" && -n "$OLD_STATE_DIR" ]]; then OLD_LOG="$OLD_STATE_DIR/events.jsonl"; fi
+if [[ -z "$OLD_STATE_FILE" && -n "$OLD_STATE_DIR" ]]; then OLD_STATE_FILE="$OLD_STATE_DIR/bridge-state.json"; fi
+[[ -n "$OLD_LOG" ]] && OLD_LOG="$(relocated "$OLD_LOG")"
+[[ -n "$OLD_STATE_FILE" ]] && OLD_STATE_FILE="$(relocated "$OLD_STATE_FILE")"
 
 if [[ "$APPLY" == 1 ]]; then
   say "Installing codex-pet-bridge (backups: $BACKUP)"
@@ -242,11 +321,11 @@ step "3. Runtime state -> $STATE"
 act mkdir -p "$STATE/anim" "$LOG_DIR"
 if [[ -f "$STATE/events.jsonl" ]]; then
   item "event log already there"
-elif [[ -n "$OLD_STATE_DIR" && -f "$OLD_STATE_DIR/events.jsonl" ]]; then
-  item "import the old event log and bridge state from $OLD_STATE_DIR"
-  act cp -p "$OLD_STATE_DIR/events.jsonl" "$STATE/events.jsonl"
-  if [[ -f "$OLD_STATE_DIR/bridge-state.json" ]]; then
-    act cp -p "$OLD_STATE_DIR/bridge-state.json" "$STATE/bridge-state.json"
+elif [[ -n "$OLD_LOG" && -f "$OLD_LOG" ]]; then
+  item "import the old event log and bridge state from $(dirname "$OLD_LOG")"
+  act cp -p "$OLD_LOG" "$STATE/events.jsonl"
+  if [[ -n "$OLD_STATE_FILE" && -f "$OLD_STATE_FILE" ]]; then
+    act cp -p "$OLD_STATE_FILE" "$STATE/bridge-state.json"
   fi
 else
   item "start with an empty event log"
@@ -285,6 +364,7 @@ write_bridge_plist() {
     <string>$(xml "$STATE/bridge-state.json")</string>
     <key>PET_AGENT_SYNC_PREFIX</key>
     <string>$(xml "$PREFIX")</string>
+$BRIDGE_EXTRA
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -327,6 +407,7 @@ write_sync_plist() {
     <string>$(xml "http://127.0.0.1:$PORT/events")</string>
     <key>PET_BRIDGE_TOKEN_FILE</key>
     <string>$(xml "$TOKEN_FILE")</string>
+$SYNC_EXTRA
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -347,8 +428,11 @@ step "4. LaunchAgents"
 if [[ "$DO_LAUNCHD" == 0 ]]; then
   item "skipped (--skip-launchd)"
 else
-  item "$BRIDGE_LABEL: node $APP/src/bridge-server.js on $HOST_BIND:$PORT, token from the file"
-  item "$SYNC_LABEL: node $APP/src/agent-sync.js --watch (prefix $PREFIX)"
+  item "$BRIDGE_LABEL: node $APP/src/bridge-server.js, listening on $HOST_BIND:$PORT, token from the file"
+  item "$SYNC_LABEL: node $APP/src/agent-sync.js --watch, source prefix \"$PREFIX\""
+  item "host from $(origin_of PET_BRIDGE_HOST "$OLD_HOST"), port from $(origin_of PET_BRIDGE_PORT "$OLD_PORT"), prefix from $(origin_of PET_AGENT_SYNC_PREFIX "$OLD_PREFIX")"
+  [[ -n "$BRIDGE_EXTRA" ]] && item "bridge keeps its other settings: $(extra_env_names "$BRIDGE_EXTRA")"
+  [[ -n "$SYNC_EXTRA" ]] && item "agent-sync keeps its other settings: $(extra_env_names "$SYNC_EXTRA")"
   item "logs: $LOG_DIR"
   if [[ "$APPLY" == 1 ]]; then
     mkdir -p "$AGENTS_DIR"
@@ -399,7 +483,7 @@ else
     else
       item "OpenClaw plugin link -> $PLUGIN"
       if [[ "$APPLY" == 1 ]]; then
-        backup "$OPENCLAW_LINK"
+        backup_link "$OPENCLAW_LINK"
         ln -sfn "$PLUGIN" "$OPENCLAW_LINK"
       fi
     fi
@@ -456,4 +540,5 @@ say ""
 say "Done."
 say "  Dashboard: http://127.0.0.1:$PORT/ui/  (PetBar's 打开控制台 fills in the token)"
 say "  Backups:   $BACKUP"
-say "  Undo:      $0 --rollback \"$BACKUP\""
+say "  Undo this run:            $0 --rollback \"$BACKUP\""
+say "  Back to the original:     $0 --rollback \"$ORIGINAL\""

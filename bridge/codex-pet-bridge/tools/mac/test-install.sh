@@ -45,6 +45,10 @@ if args[0] == "-lint":
     plistlib.load(open(args[1], "rb"))
     print(f"{args[1]}: OK")
     sys.exit(0)
+if args[0] == "-convert" and args[1] == "json":
+    import json
+    sys.stdout.write(json.dumps(plistlib.load(open(args[-1], "rb"))))
+    sys.exit(0)
 if args[0] == "-extract":
     keypath, path = args[1], args[-1]
     value = plistlib.load(open(path, "rb"))
@@ -126,6 +130,7 @@ cat > "$FAKE_HOME/Library/LaunchAgents/net.vcxzvfe.codex-pet-bridge.plist" <<PLI
     <key>PET_BRIDGE_HOST</key><string>127.0.0.1</string>
     <key>PET_BRIDGE_PORT</key><string>$PORT</string>
     <key>PET_BRIDGE_TOKEN</key><string>$TOKEN</string>
+    <key>XIAOZHI_HUB_URL</key><string>http://hub.local:8080/assistant/notifications?key=secret-hub-key</string>
   </dict>
   <key>KeepAlive</key><true/>
   <key>Label</key><string>net.vcxzvfe.codex-pet-bridge</string>
@@ -166,8 +171,10 @@ run_install() {
     "$SRC/tools/mac/install.sh" --node "$NODE_BIN" "$@"
 }
 
-snapshot() {
-  (cd "$FAKE_HOME" && find . -print0 | sort -z | xargs -0 ls -ld --time-style=+%s 2>/dev/null | awk '{print $1, $5, $6, $7}') | cksum
+snapshot() {  # names, sizes, times and modes of everything under the fake home (GNU or BSD stat)
+  (cd "$FAKE_HOME" && find . -print | LC_ALL=C sort | while IFS= read -r path; do
+    stat -c '%n %s %Y %a' "$path" 2>/dev/null || stat -f '%N %z %m %Lp' "$path"
+  done) | cksum
 }
 
 echo "dry run"
@@ -177,6 +184,8 @@ check '[[ "$(snapshot)" == "$before" ]]' "dry run changes nothing"
 check 'grep -q "import the old event log" "$ROOT/dry.txt"' "dry run finds the old event log in iCloud Drive"
 check 'grep -q "taken from the old bridge LaunchAgent" "$ROOT/dry.txt"' "dry run reuses the old token"
 check '! grep -q "$TOKEN" "$ROOT/dry.txt"' "dry run never prints the token"
+check 'grep -q "keeps its other settings: XIAOZHI_HUB_URL" "$ROOT/dry.txt"' "dry run lists carried-over settings"
+check '! grep -q "secret-hub-key" "$ROOT/dry.txt"' "dry run never prints their values"
 
 echo "apply"
 run_install --apply > "$ROOT/apply.txt" 2>&1 || { cat "$ROOT/apply.txt"; bad "install --apply exited non-zero"; }
@@ -187,6 +196,8 @@ check '[[ "$(stat -c %a "$TOKEN_FILE" 2>/dev/null || stat -f %Lp "$TOKEN_FILE")"
 check '! grep -q "$TOKEN" "$FAKE_HOME/Library/LaunchAgents/net.vcxzvfe.codex-pet-bridge.plist"' "bridge plist no longer holds the token"
 check '! grep -q "$TOKEN" "$FAKE_HOME/Library/LaunchAgents/net.vcxzvfe.codex-pet-agent-sync.plist"' "agent-sync plist no longer holds the token"
 check 'grep -q "$FAKE_HOME/.codex-pet-bridge/app/src/bridge-server.js" "$FAKE_HOME/Library/LaunchAgents/net.vcxzvfe.codex-pet-bridge.plist"' "bridge plist runs the installed copy"
+check 'grep -q "secret-hub-key" "$FAKE_HOME/Library/LaunchAgents/net.vcxzvfe.codex-pet-bridge.plist"' "other settings carried over"
+check '"$STUBS/plutil" -lint "$FAKE_HOME/Library/LaunchAgents/net.vcxzvfe.codex-pet-bridge.plist" >/dev/null' "new bridge plist is valid"
 check '[[ -f "$FAKE_HOME/.codex-pet-bridge/app/ui/index.html" && ! -d "$FAKE_HOME/.codex-pet-bridge/app/test" ]]' "app copy has the dashboard and no tests"
 check 'grep -q "\"old\"" "$FAKE_HOME/.codex-pet-bridge/state/events.jsonl"' "old event log imported"
 check '[[ "$(grep -c "$FAKE_HOME/.codex-pet-bridge/app/src/hermes-hook.js" "$FAKE_HOME/.hermes/config.yaml")" == 2 ]]' "Hermes hooks retargeted"
@@ -195,8 +206,10 @@ check 'grep -q "\"node $FAKE_HOME/.codex-pet-bridge/app/src/hermes-hook.js\"" "$
 check '[[ "$(readlink "$FAKE_HOME/.openclaw/extensions/openclaw-pet-bridge")" == "$FAKE_HOME/.codex-pet-bridge/app/integrations/openclaw-pet-bridge" ]]' "OpenClaw link retargeted"
 check 'grep -q "bridge answers" "$ROOT/apply.txt"' "bridge came up"
 check 'grep -q "/status works with the token file" "$ROOT/apply.txt"' "status works with the token file"
-BACKUP_DIR="$(ls -d "$FAKE_HOME/.codex-pet-bridge/backup/"* | head -1)"
+BACKUP_DIR="$(ls -d "$FAKE_HOME/.codex-pet-bridge/backup/"2* | head -1)"
+ORIGINAL_DIR="$FAKE_HOME/.codex-pet-bridge/backup/original"
 check '[[ -f "$BACKUP_DIR/net.vcxzvfe.codex-pet-bridge.plist" && -f "$BACKUP_DIR/config.yaml" && -f "$BACKUP_DIR/openclaw-pet-bridge.link" ]]' "backups written"
+check '[[ -f "$ORIGINAL_DIR/config.yaml" ]] && grep -q "Documents/Codex" "$ORIGINAL_DIR/config.yaml"' "original setup kept separately"
 
 echo "apply again"
 sleep 1
@@ -206,8 +219,10 @@ check 'grep -q "config.yaml: nothing to change" "$ROOT/again.txt"' "Hermes untou
 check 'grep -q "already points" "$ROOT/again.txt"' "OpenClaw untouched on re-run"
 check 'grep -q "/status works" "$ROOT/again.txt"' "bridge healthy after re-run"
 
+check 'grep -q "Documents/Codex" "$ORIGINAL_DIR/config.yaml"' "original backup untouched by the second run"
+
 echo "rollback"
-run_install --rollback "$BACKUP_DIR" > "$ROOT/rollback.txt" 2>&1 || bad "rollback exited non-zero"
+run_install --rollback "$ORIGINAL_DIR" > "$ROOT/rollback.txt" 2>&1 || bad "rollback exited non-zero"
 check 'grep -q "$TOKEN" "$FAKE_HOME/Library/LaunchAgents/net.vcxzvfe.codex-pet-bridge.plist"' "old bridge plist restored"
 check 'grep -q "Documents/Codex" "$FAKE_HOME/.hermes/config.yaml"' "old Hermes config restored"
 check '[[ "$(readlink "$FAKE_HOME/.openclaw/extensions/openclaw-pet-bridge")" == "$OLD/integrations/openclaw-pet-bridge" ]]' "old OpenClaw link restored"

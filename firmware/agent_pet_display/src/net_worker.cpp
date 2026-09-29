@@ -22,7 +22,7 @@ constexpr uint32_t kMaxFramesPerChunk = 240;
 constexpr int kMaxChunkFailures = 4;
 
 struct ChunkSlot {
-  uint8_t data[kAnimChunkBytes];
+  uint8_t* data;  // kAnimChunkBytes; allocated for the first stream and kept (the net task may still write to it)
   size_t length;
   uint32_t firstFrame;
   uint32_t frameCount;
@@ -46,7 +46,8 @@ uint32_t gStreamTotal = 0;
 uint32_t gStreamNextFrame = 0;
 uint32_t gStreamGeneration = 0;
 int gChunkFailures = 0;
-ChunkSlot* gSlots = nullptr;
+ChunkSlot gSlotTable[kAnimChunkSlots] = {};
+ChunkSlot* gSlots = nullptr;  // points at gSlotTable once every buffer exists
 
 class Guard {
  public:
@@ -378,7 +379,17 @@ void netWorkerStartStream(const std::string& id, uint32_t totalFrames) {
   }
   Guard guard;
   if (!gSlots) {
-    gSlots = static_cast<ChunkSlot*>(malloc(sizeof(ChunkSlot) * kAnimChunkSlots));
+    // Separate 16 KB blocks: without PSRAM one 48 KB block is often not available.
+    bool allocated = true;
+    for (int index = 0; index < kAnimChunkSlots; ++index) {
+      if (!gSlotTable[index].data) {
+        gSlotTable[index].data = static_cast<uint8_t*>(malloc(kAnimChunkBytes));
+      }
+      allocated = allocated && gSlotTable[index].data != nullptr;
+    }
+    if (allocated) {
+      gSlots = gSlotTable;
+    }
   }
   gStreamGeneration += 1;
   gChunkFailures = 0;

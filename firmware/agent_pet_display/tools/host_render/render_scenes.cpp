@@ -188,5 +188,7 @@ int main(int argc, char** argv) {
   failures += hostWritePanelPbm(outDir + "/egg-countdown.pbm") ? 0 : 1;
   drawEggMessage(*panel, "STREAM STALLED", "CHECK THE BRIDGE / WIFI");
   failures += hostWritePanelPbm(outDir + "/egg-message.pbm") ? 0 : 1;
+  drawEggMessage(*panel, "BAD ANIMATION DATA", "UPLOAD IT AGAIN");
+  failures += hostWritePanelPbm(outDir + "/egg-message-bad.pbm") ? 0 : 1;
   return failures == 0 ? 0 : 1;
 }

@@ -33,6 +33,7 @@ AnimChunkView gChunk{};
 bool gHaveChunk = false;
 size_t gChunkOffset = 0;
 uint32_t gWaitingSinceMs = 0;
+bool gBadData = false;
 uint8_t gFrame[kAnimMaxFrameBytes];
 
 void showMessage(U8G2& g, const char* line1, const char* line2, uint32_t nowMs) {
@@ -70,7 +71,7 @@ bool decodeUpTo(uint32_t target) {
     if (used == 0 || !applyAnimFrame(type, payload, payloadLength, gFrame, frameLength)) {
       Serial.printf("[EGG] bad record at frame %lu\n", static_cast<unsigned long>(gDecoded));
       releaseChunk();
-      gDecoded = target;  // give up on this stretch
+      gBadData = true;  // the stream cannot continue past a broken frame
       return false;
     }
     gChunkOffset += used;
@@ -102,6 +103,7 @@ void eggStartStream(const BridgeEggCommand& command, const NetSnapshot& snapshot
   gScale = animFitScale(command.width, command.height);
   gDecoded = 0;
   gWaitingSinceMs = 0;
+  gBadData = false;
   gLastCountdown = -1;
   int64_t startLocal = static_cast<int64_t>(nowMs) + 2000;
   if (snapshot.serverOffsetKnown && command.startAtMs > 0) {
@@ -195,6 +197,11 @@ void eggTick(U8G2& g, uint32_t nowMs) {
         target = gCommand.frames;
       }
       const bool advanced = decodeUpTo(target);
+      if (gBadData) {
+        eggStop();
+        showMessage(g, "BAD ANIMATION DATA", "UPLOAD IT AGAIN", nowMs);
+        return;
+      }
       if (advanced) {
         blitAnimFrameToPanel(gFrame, gCommand.width, gCommand.height, gScale, g.getBufferPtr());
         g.sendBuffer();
