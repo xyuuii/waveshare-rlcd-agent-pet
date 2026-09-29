@@ -266,13 +266,114 @@ std::string offlineFooterText(const NetworkState& network) {
   return "Bridge offline";
 }
 
+PetMode derivePetMode(const AgentState& agent, const PowerState& power) {
+  if (!agent.connected) {
+    return PetMode::Sleep;
+  }
+  if (power.lowBattery) {
+    return PetMode::Tired;
+  }
+  if (power.charging) {
+    return PetMode::Charging;
+  }
+  switch (agent.status) {
+    case AgentStatus::Running:
+      return runningPetMode(agent.statusDetail);
+    case AgentStatus::NeedsAttention:
+      return PetMode::Attention;
+    case AgentStatus::Completed:
+      return PetMode::Celebrate;
+    case AgentStatus::Error:
+      return PetMode::Error;
+    default:
+      return PetMode::Idle;
+  }
+}
+
+ClockView deriveClockView(const AgentState& agent,
+                          const PowerState& power,
+                          const EnvironmentState& environment,
+                          const DisplaySettings& settings,
+                          const DisplayState& view) {
+  ClockView clock{};
+  clock.style = settings.clockStyle;
+  clock.hour12 = settings.hour12;
+  clock.showSeconds = settings.showSeconds;
+  clock.timeValid = environment.clockValid;
+  if (environment.clockValid) {
+    clock.year = environment.year;
+    clock.month = environment.month;
+    clock.day = environment.day;
+    clock.weekday = environment.weekday;
+    clock.hour = environment.hour;
+    clock.minute = environment.minute;
+    clock.second = environment.second;
+  }
+  clock.climateValid = environment.climateValid;
+  clock.temperatureC = environment.temperatureC;
+  clock.humidityPct = environment.humidityPct;
+  clock.batteryValid = power.sampleOk;
+  clock.batteryPercent = power.percent;
+  clock.batteryLow = power.lowBattery;
+  clock.charging = power.charging;
+  clock.agentConnected = agent.connected;
+  clock.agentSource = view.sourceLabel;
+  clock.agentDetail = view.statusDetail;
+  clock.agentTask = agent.task;
+  clock.agentAttention = agent.connected && agent.status == AgentStatus::NeedsAttention;
+  clock.agentActive = agent.connected && agent.status == AgentStatus::Running;
+  clock.linkLabel = view.linkLabel;
+  clock.bridgeLabel = view.bridgeLine;
+  clock.petMode = view.petMode;
+  clock.petBubble = agent.connected ? view.buddyBubble : std::string("zzz");
+
+  int lines = 0;
+  if (agent.connected) {
+    const int visible = agent.focusCount < kMaxAgentSlots ? agent.focusCount : kMaxAgentSlots;
+    for (int index = 0; index < visible && lines < kClockAgentLines; ++index) {
+      const AgentSlotSummary& slot = agent.agentSlots[index];
+      if (!slot.present) {
+        continue;
+      }
+      ClockAgentLine& line = clock.agents[lines++];
+      line.source = sourceLabel(slot.source);
+      line.status = statusBadge(slot.status);
+      line.attention = slot.status == AgentStatus::NeedsAttention;
+      line.active = slot.status == AgentStatus::Running;
+    }
+    if (lines == 0) {
+      ClockAgentLine& line = clock.agents[lines++];
+      line.source = view.sourceLabel;
+      line.status = statusDetailBadge(agent.statusDetail, agent.status);
+      line.attention = clock.agentAttention;
+      line.active = clock.agentActive;
+    }
+  }
+  clock.agentCount = lines;
+
+  // The pet face follows the day when nothing needs attention.
+  const bool quiet = !clock.agentActive && !clock.agentAttention &&
+                     (!agent.connected || agent.status == AgentStatus::Idle ||
+                      agent.status == AgentStatus::Completed);
+  if (clock.timeValid && quiet) {
+    if (clock.hour >= 23 || clock.hour < 6) {
+      clock.petMode = PetMode::Sleep;
+      clock.petBubble = "zzz...";
+    } else if (!agent.connected || agent.status == AgentStatus::Idle) {
+      clock.petBubble = clock.hour < 12 ? "good morning!" : (clock.hour < 18 ? "good afternoon!" : "good evening!");
+    }
+  }
+  return clock;
+}
+
 }  // namespace
 
 DisplayState deriveDisplayState(const AgentState& agent,
                                 const PowerState& power,
                                 const EnvironmentState& environment,
                                 ScreenPage page,
-                                const NetworkState& network) {
+                                const NetworkState& network,
+                                const DisplaySettings& settings) {
   DisplayState view{};
   view.page = page;
   view.sourceLabel = sourceLabel(agent.source);
@@ -336,36 +437,7 @@ DisplayState deriveDisplayState(const AgentState& agent,
     view.footerMessage = view.focusHint;
   }
 
-  if (!agent.connected) {
-    view.petMode = PetMode::Sleep;
-    return view;
-  }
-  if (power.lowBattery) {
-    view.petMode = PetMode::Tired;
-    return view;
-  }
-  if (power.charging) {
-    view.petMode = PetMode::Charging;
-    return view;
-  }
-
-  switch (agent.status) {
-    case AgentStatus::Running:
-      view.petMode = runningPetMode(agent.statusDetail);
-      break;
-    case AgentStatus::NeedsAttention:
-      view.petMode = PetMode::Attention;
-      break;
-    case AgentStatus::Completed:
-      view.petMode = PetMode::Celebrate;
-      break;
-    case AgentStatus::Error:
-      view.petMode = PetMode::Error;
-      break;
-    default:
-      view.petMode = PetMode::Idle;
-      break;
-  }
-
+  view.petMode = derivePetMode(agent, power);
+  view.clock = deriveClockView(agent, power, environment, settings, view);
   return view;
 }

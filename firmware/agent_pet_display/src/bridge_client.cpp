@@ -1,6 +1,7 @@
 #include "bridge_client.h"
 
 #include <ArduinoJson.h>
+#include <stdio.h>
 #include <string>
 #include <string.h>
 
@@ -183,12 +184,9 @@ const char* parseAgentStatusDetail(const char* value) {
   return "idle";
 }
 
-bool parseAgentStatePayload(const char* json, AgentState& outState) {
-  JsonDocument doc;
-  if (deserializeJson(doc, json) != DeserializationError::Ok) {
-    return false;
-  }
+namespace {
 
+bool fillAgentState(const JsonDocument& doc, AgentState& outState) {
   JsonVariantConst notification = doc["notification"];
 
   const char* source = nullptr;
@@ -302,6 +300,215 @@ bool parseAgentStatePayload(const char* json, AgentState& outState) {
   outState.usageQuotaStyle = std::string(usageQuotaStyle && usageQuotaStyle[0] ? usageQuotaStyle : "quota");
   outState.connected = true;
   return true;
+}
+
+uint32_t nonNegativeU32(JsonVariantConst value) {
+  if (value.isNull()) {
+    return 0;
+  }
+  const long long raw = value.as<long long>();
+  if (raw < 0) {
+    return 0;
+  }
+  return raw > 0xFFFFFFFFLL ? 0xFFFFFFFFu : static_cast<uint32_t>(raw);
+}
+
+void fillCommands(const JsonDocument& doc, BridgeCommands& commands) {
+  commands = BridgeCommands{};
+  commands.serverTimeMs = doc["server_time_ms"].isNull() ? 0 : doc["server_time_ms"].as<long long>();
+
+  JsonVariantConst display = doc["display"];
+  if (!display.isNull()) {
+    BridgeDisplayCommand& out = commands.display;
+    out.present = true;
+    out.rev = nonNegativeU32(display["rev"]);
+    ClockStyle style = ClockStyle::Sans;
+    if (clockStyleFromName(display["clock_style"].as<const char*>(), style)) {
+      out.hasStyle = true;
+      out.style = style;
+    }
+    if (display["hour12"].is<bool>()) {
+      out.hasHour12 = true;
+      out.hour12 = display["hour12"].as<bool>();
+    }
+    if (display["show_seconds"].is<bool>()) {
+      out.hasShowSeconds = true;
+      out.showSeconds = display["show_seconds"].as<bool>();
+    }
+    ScreenPage page = ScreenPage::Overview;
+    if (screenPageFromName(display["page"].as<const char*>(), page)) {
+      out.hasPage = true;
+      out.page = page;
+    }
+  }
+
+  const char* tz = doc["time"]["tz"].as<const char*>();
+  if (tz && tz[0] && strlen(tz) < 64) {
+    commands.hasTz = true;
+    commands.tz = tz;
+  }
+
+  JsonVariantConst egg = doc["egg"];
+  if (!egg.isNull()) {
+    const char* id = egg["id"].as<const char*>();
+    const uint32_t frames = nonNegativeU32(egg["frames"]);
+    const uint32_t fpsX100 = nonNegativeU32(egg["fps_x100"]);
+    const uint32_t width = nonNegativeU32(egg["width"]);
+    const uint32_t height = nonNegativeU32(egg["height"]);
+    const bool sane = id && id[0] && strlen(id) <= 48 && frames > 0 && fpsX100 >= 100 && fpsX100 <= 6000 &&
+                      width > 0 && width <= 400 && height > 0 && height <= 300;
+    if (sane) {
+      BridgeEggCommand& out = commands.egg;
+      out.present = true;
+      out.rev = nonNegativeU32(egg["rev"]);
+      out.id = id;
+      out.frames = frames;
+      out.fpsX100 = static_cast<uint16_t>(fpsX100);
+      out.width = static_cast<uint16_t>(width);
+      out.height = static_cast<uint16_t>(height);
+      out.startAtMs = egg["start_at_ms"].isNull() ? 0 : egg["start_at_ms"].as<long long>();
+    }
+  }
+}
+
+void appendParam(std::string& out, const char* key, const char* value) {
+  out += '&';
+  out += key;
+  out += '=';
+  for (const char* p = value; p && *p; ++p) {
+    const char ch = *p;
+    const bool safe = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                      ch == '-' || ch == '_' || ch == '.';
+    if (safe) {
+      out += ch;
+    } else {
+      static constexpr char kHex[] = "0123456789ABCDEF";
+      out += '%';
+      out += kHex[(static_cast<unsigned char>(ch) >> 4) & 0x0F];
+      out += kHex[static_cast<unsigned char>(ch) & 0x0F];
+    }
+  }
+}
+
+void appendParam(std::string& out, const char* key, long value) {
+  char buffer[24];
+  snprintf(buffer, sizeof(buffer), "%ld", value);
+  appendParam(out, key, buffer);
+}
+
+}  // namespace
+
+bool parseAgentStatePayload(const char* json, AgentState& outState) {
+  JsonDocument doc;
+  if (!json || deserializeJson(doc, json) != DeserializationError::Ok) {
+    return false;
+  }
+  return fillAgentState(doc, outState);
+}
+
+bool parsePollPayload(const char* json, AgentState& outState, BridgeCommands& commands) {
+  JsonDocument doc;
+  if (!json || deserializeJson(doc, json) != DeserializationError::Ok) {
+    return false;
+  }
+  if (!fillAgentState(doc, outState)) {
+    return false;
+  }
+  fillCommands(doc, commands);
+  return true;
+}
+
+const char* screenPageName(ScreenPage page) {
+  switch (page) {
+    case ScreenPage::Usage:
+      return "usage";
+    case ScreenPage::Clock:
+      return "clock";
+    default:
+      return "overview";
+  }
+}
+
+bool screenPageFromName(const char* name, ScreenPage& out) {
+  if (!name || !name[0]) {
+    return false;
+  }
+  if (strcmp(name, "overview") == 0) {
+    out = ScreenPage::Overview;
+    return true;
+  }
+  if (strcmp(name, "usage") == 0) {
+    out = ScreenPage::Usage;
+    return true;
+  }
+  if (strcmp(name, "clock") == 0) {
+    out = ScreenPage::Clock;
+    return true;
+  }
+  return false;
+}
+
+std::string buildTelemetryQuery(const DeviceTelemetry& t) {
+  std::string out;
+  appendParam(out, "fw", t.firmware ? t.firmware : "");
+  if (t.batteryValid) {
+    appendParam(out, "bat", static_cast<long>(t.batteryPercent));
+    appendParam(out, "mv", static_cast<long>(t.batteryMv));
+  }
+  if (t.charging) {
+    appendParam(out, "chg", 1L);
+  }
+  if (t.climateValid) {
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "%.1f", static_cast<double>(t.temperatureC));
+    appendParam(out, "temp", buffer);
+    snprintf(buffer, sizeof(buffer), "%.0f", static_cast<double>(t.humidityPct));
+    appendParam(out, "hum", buffer);
+  }
+  if (t.rssi < 0) {
+    appendParam(out, "rssi", static_cast<long>(t.rssi));
+  }
+  appendParam(out, "up", static_cast<long>(t.uptimeS));
+  appendParam(out, "page", screenPageName(t.page));
+  appendParam(out, "style", clockStyleName(t.clockStyle));
+  appendParam(out, "srev", static_cast<long>(t.settingsRev));
+  appendParam(out, "erev", static_cast<long>(t.eggRev));
+  if (t.freeHeap > 0) {
+    appendParam(out, "heap", static_cast<long>(t.freeHeap));
+  }
+  appendParam(out, "clk", t.timeValid ? 1L : 0L);
+  return out;
+}
+
+bool fetchPollState(const char* url, AgentState& outState, BridgeCommands& commands, uint16_t timeoutMs) {
+#ifdef ARDUINO
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  HTTPClient http;
+  http.setConnectTimeout(timeoutMs);
+  http.setTimeout(timeoutMs);
+  if (!http.begin(url)) {
+    return false;
+  }
+
+  const int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    return false;
+  }
+
+  const String body = http.getString();
+  http.end();
+  return parsePollPayload(body.c_str(), outState, commands);
+#else
+  (void)url;
+  (void)outState;
+  (void)commands;
+  (void)timeoutMs;
+  return false;
+#endif
 }
 
 bool fetchAgentState(const char* url, AgentState& outState) {

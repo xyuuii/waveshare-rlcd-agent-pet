@@ -334,6 +334,102 @@ void test_invalid_json_returns_false(void) {
   TEST_ASSERT_FALSE(ok);
 }
 
+
+void test_poll_payload_carries_display_tz_and_egg_commands(void) {
+  const char* json =
+      "{\"ok\":true,\"source\":\"mac-codex\",\"current_status\":\"thinking\",\"task\":\"t\","
+      "\"updated_at\":\"2026-09-28T09:00:00Z\",\"server_time_ms\":1790588537123,"
+      "\"display\":{\"rev\":7,\"clock_style\":\"segment\",\"hour12\":true,\"show_seconds\":false,\"page\":\"clock\"},"
+      "\"time\":{\"tz\":\"GMT0BST,M3.5.0/1,M10.5.0\",\"zone\":\"Europe/London\"},"
+      "\"egg\":{\"rev\":3,\"id\":\"demo\",\"frames\":120,\"fps_x100\":2000,\"width\":400,\"height\":300,"
+      "\"start_at_ms\":1790588541000}}";
+  AgentState state{};
+  BridgeCommands commands{};
+  TEST_ASSERT_TRUE(parsePollPayload(json, state, commands));
+  TEST_ASSERT_EQUAL(static_cast<int>(SourceKind::Codex), static_cast<int>(state.source));
+  TEST_ASSERT_TRUE(commands.serverTimeMs == 1790588537123LL);
+  TEST_ASSERT_TRUE(commands.display.present);
+  TEST_ASSERT_EQUAL_UINT32(7, commands.display.rev);
+  TEST_ASSERT_TRUE(commands.display.hasStyle);
+  TEST_ASSERT_EQUAL(static_cast<int>(ClockStyle::Segment), static_cast<int>(commands.display.style));
+  TEST_ASSERT_TRUE(commands.display.hasHour12);
+  TEST_ASSERT_TRUE(commands.display.hour12);
+  TEST_ASSERT_TRUE(commands.display.hasShowSeconds);
+  TEST_ASSERT_FALSE(commands.display.showSeconds);
+  TEST_ASSERT_TRUE(commands.display.hasPage);
+  TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Clock), static_cast<int>(commands.display.page));
+  TEST_ASSERT_TRUE(commands.hasTz);
+  TEST_ASSERT_EQUAL_STRING("GMT0BST,M3.5.0/1,M10.5.0", commands.tz.c_str());
+  TEST_ASSERT_TRUE(commands.egg.present);
+  TEST_ASSERT_EQUAL_STRING("demo", commands.egg.id.c_str());
+  TEST_ASSERT_EQUAL_UINT32(120, commands.egg.frames);
+  TEST_ASSERT_EQUAL_UINT16(2000, commands.egg.fpsX100);
+  TEST_ASSERT_TRUE(commands.egg.startAtMs == 1790588541000LL);
+}
+
+void test_poll_payload_rejects_unsafe_egg_and_unknown_style(void) {
+  const char* json =
+      "{\"ok\":true,\"current_status\":\"idle\","
+      "\"display\":{\"rev\":1,\"clock_style\":\"comic\",\"page\":\"settings\"},"
+      "\"egg\":{\"rev\":2,\"id\":\"big\",\"frames\":10,\"fps_x100\":2000,\"width\":1920,\"height\":1080}}";
+  AgentState state{};
+  BridgeCommands commands{};
+  TEST_ASSERT_TRUE(parsePollPayload(json, state, commands));
+  TEST_ASSERT_TRUE(commands.display.present);
+  TEST_ASSERT_FALSE(commands.display.hasStyle);
+  TEST_ASSERT_FALSE(commands.display.hasPage);
+  TEST_ASSERT_FALSE(commands.display.hasHour12);
+  TEST_ASSERT_FALSE(commands.egg.present);
+  TEST_ASSERT_FALSE(commands.hasTz);
+  TEST_ASSERT_TRUE(commands.serverTimeMs == 0);
+}
+
+void test_legacy_payload_has_no_commands(void) {
+  const char* json = "{\"ok\":true,\"current_status\":\"completed\",\"source\":\"hermes\"}";
+  AgentState state{};
+  BridgeCommands commands{};
+  commands.hasTz = true;
+  TEST_ASSERT_TRUE(parsePollPayload(json, state, commands));
+  TEST_ASSERT_FALSE(commands.display.present);
+  TEST_ASSERT_FALSE(commands.egg.present);
+  TEST_ASSERT_FALSE(commands.hasTz);
+}
+
+void test_telemetry_query_is_compact_and_url_safe(void) {
+  DeviceTelemetry t{};
+  t.firmware = "1.3.0 beta";
+  t.batteryValid = true;
+  t.batteryPercent = 84;
+  t.batteryMv = 3980;
+  t.climateValid = true;
+  t.temperatureC = 22.64f;
+  t.humidityPct = 48.2f;
+  t.rssi = -52;
+  t.uptimeS = 3600;
+  t.page = ScreenPage::Clock;
+  t.clockStyle = ClockStyle::Words;
+  t.settingsRev = 7;
+  t.eggRev = 3;
+  t.timeValid = true;
+  const std::string query = buildTelemetryQuery(t);
+  TEST_ASSERT_EQUAL_STRING(
+      "&fw=1.3.0%20beta&bat=84&mv=3980&temp=22.6&hum=48&rssi=-52&up=3600&page=clock&style=words&srev=7&erev=3&clk=1",
+      query.c_str());
+
+  DeviceTelemetry empty{};
+  TEST_ASSERT_EQUAL_STRING("&fw=&up=0&page=overview&style=sans&srev=0&erev=0&clk=0", buildTelemetryQuery(empty).c_str());
+}
+
+void test_page_names_round_trip(void) {
+  ScreenPage page = ScreenPage::Overview;
+  TEST_ASSERT_TRUE(screenPageFromName(screenPageName(ScreenPage::Usage), page));
+  TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Usage), static_cast<int>(page));
+  TEST_ASSERT_TRUE(screenPageFromName("clock", page));
+  TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Clock), static_cast<int>(page));
+  TEST_ASSERT_FALSE(screenPageFromName("secret", page));
+  TEST_ASSERT_FALSE(screenPageFromName(nullptr, page));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_parse_running_codex_payload);
@@ -356,5 +452,10 @@ int main(void) {
   RUN_TEST(test_out_of_window_pinned_focus_falls_back_to_auto_metadata);
   RUN_TEST(test_negative_pinned_focus_index_falls_back_to_auto_metadata);
   RUN_TEST(test_invalid_json_returns_false);
+  RUN_TEST(test_poll_payload_carries_display_tz_and_egg_commands);
+  RUN_TEST(test_poll_payload_rejects_unsafe_egg_and_unknown_style);
+  RUN_TEST(test_legacy_payload_has_no_commands);
+  RUN_TEST(test_telemetry_query_is_compact_and_url_safe);
+  RUN_TEST(test_page_names_round_trip);
   return UNITY_END();
 }

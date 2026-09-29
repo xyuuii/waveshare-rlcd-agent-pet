@@ -65,11 +65,15 @@ void test_display_state_defaults_include_layout_placeholders(void) {
   TEST_ASSERT_EQUAL_STRING("BRIDGE --", view.bridgeLine.c_str());
 }
 
-void test_next_screen_page_cycles_between_overview_and_usage(void) {
+void test_next_screen_page_cycles_through_overview_usage_and_clock(void) {
   TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Usage),
                     static_cast<int>(nextScreenPage(ScreenPage::Overview)));
-  TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Overview),
+  TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Clock),
                     static_cast<int>(nextScreenPage(ScreenPage::Usage)));
+  TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Overview),
+                    static_cast<int>(nextScreenPage(ScreenPage::Clock)));
+  TEST_ASSERT_EQUAL(3, screenPageNumber(ScreenPage::Clock));
+  TEST_ASSERT_EQUAL(kScreenPageCount, screenPageNumber(ScreenPage::Clock));
 }
 
 void test_environment_refresh_interval_supports_live_seconds(void) {
@@ -83,7 +87,7 @@ int runUnityTests(void) {
   RUN_TEST(test_low_battery_power_state_does_show_battery_detail);
   RUN_TEST(test_charging_power_state_does_show_battery_detail);
   RUN_TEST(test_display_state_defaults_include_layout_placeholders);
-  RUN_TEST(test_next_screen_page_cycles_between_overview_and_usage);
+  RUN_TEST(test_next_screen_page_cycles_through_overview_usage_and_clock);
   RUN_TEST(test_environment_refresh_interval_supports_live_seconds);
   return UNITY_END();
 }

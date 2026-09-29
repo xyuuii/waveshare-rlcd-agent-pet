@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <string>
 
+#include "clock_model.h"
+
 enum class SourceKind {
   Codex,
   Hermes,
@@ -40,6 +42,17 @@ enum class PetMode {
 enum class ScreenPage {
   Overview,
   Usage,
+  Clock,
+};
+
+static constexpr int kScreenPageCount = 3;
+
+// User-facing display preferences; persisted on the board and optionally
+// pushed from the bridge (menu bar app / dashboard).
+struct DisplaySettings {
+  ClockStyle clockStyle{ClockStyle::Sans};
+  bool hour12{false};
+  bool showSeconds{true};
 };
 
 enum class FocusMode {
@@ -114,6 +127,49 @@ struct NetworkState {
   std::string ip{};
 };
 
+struct ClockAgentLine {
+  std::string source{};
+  std::string status{};
+  bool attention{false};
+  bool active{false};
+};
+
+static constexpr int kClockAgentLines = 3;
+
+// Everything a clock face needs, already formatted and bounded.
+struct ClockView {
+  ClockStyle style{ClockStyle::Sans};
+  bool hour12{false};
+  bool showSeconds{true};
+  bool timeValid{false};
+  int year{0};
+  int month{0};
+  int day{0};
+  int weekday{0};
+  int hour{0};
+  int minute{0};
+  int second{0};
+  bool climateValid{false};
+  float temperatureC{0.0f};
+  float humidityPct{0.0f};
+  bool batteryValid{false};
+  int batteryPercent{0};
+  bool batteryLow{false};
+  bool charging{false};
+  bool agentConnected{false};
+  std::string agentSource{"--"};
+  std::string agentDetail{"IDLE"};
+  std::string agentTask{};
+  bool agentAttention{false};
+  bool agentActive{false};
+  std::array<ClockAgentLine, kClockAgentLines> agents{};
+  int agentCount{0};
+  std::string linkLabel{"WIFI --"};
+  std::string bridgeLabel{"BRIDGE --"};
+  PetMode petMode{PetMode::Sleep};
+  std::string petBubble{"..."};
+};
+
 struct DisplayState {
   ScreenPage page{ScreenPage::Overview};
   PetMode petMode{PetMode::Sleep};
@@ -144,6 +200,7 @@ struct DisplayState {
   std::string linkLabel{"WIFI --"};
   std::string networkLine{"WIFI --"};
   std::string bridgeLine{"BRIDGE --"};
+  ClockView clock{};
 };
 
 inline bool shouldShowBatteryDetail(const PowerState& powerState) {
@@ -151,5 +208,16 @@ inline bool shouldShowBatteryDetail(const PowerState& powerState) {
 }
 
 inline ScreenPage nextScreenPage(ScreenPage page) {
-  return page == ScreenPage::Overview ? ScreenPage::Usage : ScreenPage::Overview;
+  switch (page) {
+    case ScreenPage::Overview:
+      return ScreenPage::Usage;
+    case ScreenPage::Usage:
+      return ScreenPage::Clock;
+    default:
+      return ScreenPage::Overview;
+  }
+}
+
+inline int screenPageNumber(ScreenPage page) {
+  return static_cast<int>(page) + 1;
 }

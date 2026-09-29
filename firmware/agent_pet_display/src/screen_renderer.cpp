@@ -8,6 +8,7 @@
 #include <string>
 
 #include "ST7305_U8g2.h"
+#include "clock_faces.h"
 #include "doto_font.h"
 #include "pet_sprites.h"
 #include "screen_layout.h"
@@ -151,10 +152,13 @@ void drawRightInfoCard(const ScreenRect& rect,
                        const std::string& line2) {
   gU8g2->drawRFrame(rect.x, rect.y, rect.w, rect.h, 6);
   drawLabelChip(rect.x + 8, rect.y + 6, 42, label);
-  drawDotoText(DotoFontSize::Medium,
+  // Long values (e.g. "WIFI -61dBm") drop to the small face instead of being clipped.
+  const bool fitsMedium = dotoTextWidth(DotoFontSize::Medium, line1.c_str()) <= rect.w - 20;
+  const DotoFontSize line1Size = fitsMedium ? DotoFontSize::Medium : DotoFontSize::Small;
+  drawDotoText(line1Size,
                rect.x + 10,
-               rect.y + 22,
-               clipDotoTextToPixelWidth(line1, rect.w - 20, DotoFontSize::Medium));
+               rect.y + (fitsMedium ? 22 : 25),
+               clipDotoTextToPixelWidth(line1, rect.w - 20, line1Size));
   drawDotoText(DotoFontSize::Small,
                rect.x + 10,
                rect.y + 41,
@@ -323,6 +327,31 @@ int drawFocusChip(const DisplayState& display, int rightEdge) {
   return x;
 }
 
+uint32_t gLastFrameHash = 0;
+bool gHasFrame = false;
+
+uint32_t frameHash() {
+  const uint8_t* buffer = gU8g2->getBufferPtr();
+  const size_t size = static_cast<size_t>(gU8g2->getBufferTileWidth()) * 8U * gU8g2->getBufferTileHeight();
+  uint32_t hash = 2166136261u;
+  for (size_t index = 0; index < size; ++index) {
+    hash ^= buffer[index];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+// Pushing 15 KB over SPI costs power; skip it when nothing changed.
+void flushIfChanged() {
+  const uint32_t hash = frameHash();
+  if (gHasFrame && hash == gLastFrameHash) {
+    return;
+  }
+  gU8g2->sendBuffer();
+  gLastFrameHash = hash;
+  gHasFrame = true;
+}
+
 }  // namespace
 
 void ScreenRenderer::begin() {
@@ -332,8 +361,27 @@ void ScreenRenderer::begin() {
   gU8g2->setFont(u8g2_font_t0_11b_tf);
 }
 
+U8G2* ScreenRenderer::u8g2() {
+  return gU8g2;
+}
+
+void ScreenRenderer::invalidate() {
+  gHasFrame = false;
+}
+
 void ScreenRenderer::render(const DisplayState& display, const PowerState& power) {
   if (!gU8g2) {
+    return;
+  }
+
+  if (display.page == ScreenPage::Clock) {
+    gU8g2->clearBuffer();
+    gU8g2->setDrawColor(1);
+    gU8g2->drawBox(0, 0, kLcdWidth, kLcdHeight);
+    gU8g2->setDrawColor(0);
+    gU8g2->setFontPosTop();
+    drawClockFace(*gU8g2, display.clock, millis());
+    flushIfChanged();
     return;
   }
 
@@ -380,6 +428,8 @@ void ScreenRenderer::render(const DisplayState& display, const PowerState& power
                58,
                footerY + 7,
                clipDotoTextToPixelWidth(display.footerMessage, 260, DotoFontSize::Small));
-  drawDotoText(DotoFontSize::Small, 338, footerY + 7, display.page == ScreenPage::Usage ? "P2/2" : "P1/2");
-  gU8g2->sendBuffer();
+  char pageLabel[8];
+  snprintf(pageLabel, sizeof(pageLabel), "P%d/%d", screenPageNumber(display.page), kScreenPageCount);
+  drawDotoText(DotoFontSize::Small, 338, footerY + 7, pageLabel);
+  flushIfChanged();
 }

@@ -234,6 +234,88 @@ void test_wifi_reconnecting_gets_distinct_status_from_bridge_offline(void) {
   TEST_ASSERT_EQUAL_STRING("WiFi reconnecting", view.footerMessage.c_str());
 }
 
+
+void test_clock_view_carries_time_settings_and_agents(void) {
+  AgentState agent{};
+  agent.source = SourceKind::Codex;
+  agent.status = AgentStatus::Running;
+  agent.statusDetail = "tool-use";
+  agent.task = "build firmware";
+  agent.connected = true;
+  agent.focusCount = 3;
+  agent.agentSlots[0] = AgentSlotSummary{"a", SourceKind::Hermes, AgentStatus::NeedsAttention, "", "", true};
+  agent.agentSlots[1] = AgentSlotSummary{"b", SourceKind::Codex, AgentStatus::Running, "", "", true};
+  agent.agentSlots[2] = AgentSlotSummary{"c", SourceKind::OpenClaw, AgentStatus::Idle, "", "", false};
+  const PowerState power{3900, 77, false, false, true};
+  const EnvironmentState environment{true, 2026, 9, 28, 14, 5, 9, 1, 21.0f, 40.0f, true};
+  DisplaySettings settings{};
+  settings.clockStyle = ClockStyle::Words;
+  settings.hour12 = true;
+  settings.showSeconds = false;
+
+  const DisplayState view = deriveDisplayState(agent, power, environment, ScreenPage::Clock, NetworkState{}, settings);
+
+  TEST_ASSERT_EQUAL(static_cast<int>(ScreenPage::Clock), static_cast<int>(view.page));
+  TEST_ASSERT_EQUAL(static_cast<int>(ClockStyle::Words), static_cast<int>(view.clock.style));
+  TEST_ASSERT_TRUE(view.clock.hour12);
+  TEST_ASSERT_FALSE(view.clock.showSeconds);
+  TEST_ASSERT_TRUE(view.clock.timeValid);
+  TEST_ASSERT_EQUAL(14, view.clock.hour);
+  TEST_ASSERT_EQUAL(1, view.clock.weekday);
+  TEST_ASSERT_EQUAL(77, view.clock.batteryPercent);
+  TEST_ASSERT_TRUE(view.clock.agentActive);
+  TEST_ASSERT_FALSE(view.clock.agentAttention);
+  TEST_ASSERT_EQUAL_STRING("TOOL USE", view.clock.agentDetail.c_str());
+  // Slot c is not present, so only two lines; attention is carried per line.
+  TEST_ASSERT_EQUAL(2, view.clock.agentCount);
+  TEST_ASSERT_EQUAL_STRING("HERMES", view.clock.agents[0].source.c_str());
+  TEST_ASSERT_TRUE(view.clock.agents[0].attention);
+  TEST_ASSERT_EQUAL_STRING("CODEX", view.clock.agents[1].source.c_str());
+  TEST_ASSERT_TRUE(view.clock.agents[1].active);
+}
+
+void test_clock_pet_sleeps_at_night_when_nothing_runs(void) {
+  AgentState agent{};
+  agent.source = SourceKind::Codex;
+  agent.status = AgentStatus::Idle;
+  agent.connected = true;
+  const PowerState power{3900, 77, false, false, true};
+  EnvironmentState environment{true, 2026, 9, 28, 2, 30, 0, 1, 21.0f, 40.0f, true};
+
+  DisplayState view = deriveDisplayState(agent, power, environment, ScreenPage::Clock);
+  TEST_ASSERT_EQUAL(static_cast<int>(PetMode::Sleep), static_cast<int>(view.clock.petMode));
+  TEST_ASSERT_EQUAL_STRING("zzz...", view.clock.petBubble.c_str());
+
+  environment.hour = 9;
+  view = deriveDisplayState(agent, power, environment, ScreenPage::Clock);
+  TEST_ASSERT_EQUAL_STRING("good morning!", view.clock.petBubble.c_str());
+
+  agent.status = AgentStatus::Running;
+  agent.statusDetail = "thinking";
+  environment.hour = 2;
+  view = deriveDisplayState(agent, power, environment, ScreenPage::Clock);
+  TEST_ASSERT_EQUAL(static_cast<int>(PetMode::Thinking), static_cast<int>(view.clock.petMode));
+  TEST_ASSERT_EQUAL_STRING("thinking...", view.clock.petBubble.c_str());
+}
+
+void test_clock_view_without_bridge_or_time(void) {
+  AgentState agent{};
+  const PowerState power{3900, 77, false, false, true};
+  const EnvironmentState environment{};
+  NetworkState network{};
+  network.wifiKnown = true;
+  network.wifiConnected = true;
+  network.rssi = -58;
+
+  const DisplayState view = deriveDisplayState(agent, power, environment, ScreenPage::Clock, network);
+  TEST_ASSERT_FALSE(view.clock.timeValid);
+  TEST_ASSERT_FALSE(view.clock.agentConnected);
+  TEST_ASSERT_EQUAL(0, view.clock.agentCount);
+  TEST_ASSERT_EQUAL_STRING("BRIDGE OFF", view.clock.bridgeLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("WIFI -58", view.clock.linkLabel.c_str());
+  TEST_ASSERT_EQUAL_STRING("zzz", view.clock.petBubble.c_str());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_thinking_agent_gets_dedicated_pet_mode);
@@ -247,5 +329,8 @@ int main(void) {
   RUN_TEST(test_invalid_pinned_focus_falls_back_to_auto_label);
   RUN_TEST(test_wifi_connected_bridge_offline_gets_clear_footer);
   RUN_TEST(test_wifi_reconnecting_gets_distinct_status_from_bridge_offline);
+  RUN_TEST(test_clock_view_carries_time_settings_and_agents);
+  RUN_TEST(test_clock_pet_sleeps_at_night_when_nothing_runs);
+  RUN_TEST(test_clock_view_without_bridge_or_time);
   return UNITY_END();
 }
