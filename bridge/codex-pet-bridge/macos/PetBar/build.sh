@@ -1,12 +1,14 @@
 #!/bin/bash
 # Builds PetBar.app with the Xcode Command Line Tools (no Xcode project).
 #
-#   ./build.sh              build into ./build/PetBar.app
+#   ./build.sh              build into $TMPDIR/petbar-build/PetBar.app
 #   ./build.sh --install    also copy it to ~/Applications and start it
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="$HERE/build"
+# Build outside the checkout: in iCloud Drive (or anywhere Finder adds metadata)
+# files carry extended attributes that codesign refuses to sign.
+OUT="${PETBAR_BUILD_DIR:-${TMPDIR:-/tmp}/petbar-build}"
 APP="$OUT/PetBar.app"
 VERSION="1.0.0"
 INSTALL=0
@@ -29,6 +31,7 @@ xcrun --sdk macosx swiftc -O -swift-version 5 \
   "$HERE/main.swift" -o "$APP/Contents/MacOS/PetBar"
 sed "s/__VERSION__/$VERSION/" "$HERE/Info.plist" > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
+xattr -cr "$APP" 2>/dev/null || true
 # Ad-hoc signature: enough for a local app and for "open at login".
 codesign --force --sign - --timestamp=none "$APP"
 echo "built $APP"
@@ -38,7 +41,7 @@ if [[ "$INSTALL" == 1 ]]; then
   mkdir -p "$HOME/Applications"
   pkill -x PetBar 2>/dev/null || true
   rm -rf "$DEST"
-  cp -R "$APP" "$DEST"
+  ditto "$APP" "$DEST"
   open "$DEST"
   echo "installed $DEST (use the menu's 登录时启动 to start it at login)"
 fi
