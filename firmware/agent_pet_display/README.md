@@ -4,7 +4,7 @@ PlatformIO Arduino firmware for the Waveshare ESP32-S3-RLCD-4.2.
 
 ## Before flashing
 
-1. Copy `include/secrets.example.h` to `include/secrets.h` (git ignores it) and set the Wi-Fi credentials, or run `tools/import-legacy-secrets.sh <old include/app_config.h>` to reuse an older checkout's values
+1. Create `include/secrets.h` (git ignores it): `tools/make-secrets.sh` asks for the Wi-Fi name and password and builds the bridge URL from the Mac's LAN address and the bridge token; `tools/import-legacy-secrets.sh <old include/app_config.h>` reuses an older checkout's values; or copy `include/secrets.example.h` and fill it in
 2. Set `kBridgeUrl` to the Mac's LAN IP and bridge endpoint, with the bridge token
 3. If a charge-status GPIO is identified on hardware, set `kChargeSensePin`; otherwise keep it at `-1` and validate voltage and percent first
 
