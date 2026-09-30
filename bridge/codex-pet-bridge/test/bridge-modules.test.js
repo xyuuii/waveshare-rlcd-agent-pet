@@ -70,7 +70,7 @@ test("telemetry parsing and the secret-gesture counter", () => {
 
   const registry = new DeviceRegistry({ onlineWindowMs: 10_000 });
   assert.deepEqual(registry.snapshot(NOW), { seen: false, online: false });
-  const board = { address: "192.168.1.231" };
+  const board = { address: "192.168.1.50" };
   const press = (eggRequest, at) => registry.update({ ...telemetry, eggRequest }, { ...board, now: NOW + at }).eggRequested;
   // First sighting after a bridge restart never replays an old request.
   assert.equal(press(2, 0), false);
@@ -82,7 +82,7 @@ test("telemetry parsing and the secret-gesture counter", () => {
   assert.equal(press(1, 2500), true, "first gesture after the reboot");
   const snapshot = registry.snapshot(NOW + 5000);
   assert.equal(snapshot.online, true);
-  assert.equal(snapshot.address, "192.168.1.231");
+  assert.equal(snapshot.address, "192.168.1.50");
   assert.equal(snapshot.polls, 7);
   assert.equal(registry.snapshot(NOW + 20_000).online, false);
 });

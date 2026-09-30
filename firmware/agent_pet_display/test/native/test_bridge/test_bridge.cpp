@@ -432,10 +432,10 @@ void test_page_names_round_trip(void) {
 
 
 void test_anim_chunk_url_keeps_token_and_encodes_id(void) {
-  const std::string url = buildAnimChunkUrl("http://192.168.1.204:17366/esp32/poll?token=abc123", "bad apple", 120, 60,
+  const std::string url = buildAnimChunkUrl("http://192.168.1.23:17366/esp32/poll?token=abc123", "bad apple", 120, 60,
                                             16384);
   TEST_ASSERT_EQUAL_STRING(
-      "http://192.168.1.204:17366/esp32/anim/bad%20apple/frames?token=abc123&start=120&count=60&max_bytes=16384",
+      "http://192.168.1.23:17366/esp32/anim/bad%20apple/frames?token=abc123&start=120&count=60&max_bytes=16384",
       url.c_str());
   TEST_ASSERT_EQUAL_STRING("http://h:1/esp32/anim/demo/frames?start=0&count=1&max_bytes=10",
                            buildAnimChunkUrl("http://h:1/esp32/poll", "demo", 0, 1, 10).c_str());

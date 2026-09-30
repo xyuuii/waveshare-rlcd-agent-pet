@@ -51,7 +51,7 @@ NetworkState onlineNetwork() {
   net.wifiKnown = true;
   net.wifiConnected = true;
   net.rssi = -52;
-  net.ip = "192.168.1.231";
+  net.ip = "192.168.1.50";
   return net;
 }
 
