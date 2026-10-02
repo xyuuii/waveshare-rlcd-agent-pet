@@ -166,12 +166,19 @@ try {
 
   console.log("playback");
   await page.check("#soundToggle");
+  await page.evaluate(() => {
+    // Seeking a playing video drops its sound; the sync must only seek before the start.
+    window.__seeks = [];
+    document.querySelector("#srcVideo").addEventListener("seeking", () => window.__seeks.push(Date.now()));
+  });
+  const eggReply = page.waitForResponse((response) => response.url().endsWith("/egg/play"));
   await page.click('.anim >> text="▶ 板子播放"');
+  const startAtMs = (await (await eggReply).json()).egg?.startAtMs || 0;
   await page.waitForTimeout(300);
   const polled = await boardPoll();
   check(polled.egg?.id === "e2e-clip", "board receives the egg command");
   check(polled.egg?.start_at_ms > polled.server_time_ms, "egg starts in the future");
-  await page.waitForTimeout(3200);
+  await page.waitForTimeout(Math.max(0, startAtMs + 700 - Date.now()));
   const playing = await page.evaluate(() => ({
     label: document.querySelector("#mirrorLabel").textContent,
     videoPlaying: !document.querySelector("#srcVideo").paused,
@@ -180,6 +187,14 @@ try {
   check(playing.label.includes("板子播放中"), `mirror follows the board (${playing.label})`);
   check(playing.videoPlaying && !playing.muted, "local video plays with sound in sync");
   if (shots) await page.screenshot({ path: join(shots, "library-playing.png"), clip: await page.locator("#libraryCard").boundingBox() });
+  // The clip is 4 s long: by start + 4.6 s the sound has stopped on its own.
+  await page.waitForTimeout(Math.max(0, startAtMs + 4_600 - Date.now()));
+  const afterClip = await page.evaluate((start) => {
+    const video = document.querySelector("#srcVideo");
+    return { seeks: window.__seeks.filter((at) => at > start + 300).length, paused: video.paused, muted: video.muted };
+  }, startAtMs);
+  check(afterClip.seeks === 0, `sound plays through without seeking (${afterClip.seeks} seeks after the start)`);
+  check(afterClip.paused && afterClip.muted, "sound stops at the end of the clip");
   await page.click("#stopEgg");
   await page.waitForTimeout(400);
   check((await boardPoll()).egg === undefined, "stop clears the egg command");

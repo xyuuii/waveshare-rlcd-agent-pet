@@ -11,6 +11,7 @@ import {
   suggestAnimationId,
   supportsFrameCallbacks
 } from "./converter.js";
+import { ServerClock, SoundSync } from "./sound-sync.js";
 
 // ---------------------------------------------------------------- constants
 
@@ -51,6 +52,7 @@ const PAGE_NAMES = { overview: "概览", usage: "用量", clock: "时钟" };
 const STORAGE_TOKEN = "rlcdpet.token";
 const STORAGE_CLIPS = "rlcdpet.clips";
 const STORAGE_OFFSET = "rlcdpet.audioOffset";
+const STORAGE_LATENCY = "rlcdpet.soundStartLatency";
 
 // ---------------------------------------------------------------- helpers
 
@@ -110,8 +112,10 @@ function prettyTask(task) {
   return text;
 }
 
+const serverClock = new ServerClock();
+
 function serverNow() {
-  return Date.now() + state.offsetMs;
+  return Date.now() + serverClock.offsetMs;
 }
 
 function timeAgo(value) {
@@ -175,9 +179,9 @@ const state = {
   token: "",
   status: null,
   failures: 0,
-  offsetMs: 0,
-  bestRtt: Infinity,
-  offsetAt: 0,
+  // Bumped whenever this page starts or stops an egg, so a /status reply that
+  // was already under way does not undo it.
+  eggEpoch: 0,
   pendingSettings: null,
   file: null,
   fileUrl: "",
@@ -231,19 +235,8 @@ async function api(path, { method = "GET", json, body, raw = false } = {}) {
     const message = data.error || (data.errors && data.errors.join("；")) || `${response.status} ${response.statusText}`;
     throw new ApiError(message, response.status);
   }
-  if (Number.isFinite(data.serverTimeMs)) noteServerTime(data.serverTimeMs, sent, Date.now());
+  if (Number.isFinite(data.serverTimeMs)) serverClock.note(data.serverTimeMs, sent, Date.now());
   return data;
-}
-
-// Keeps the sample with the shortest round trip; refreshes every minute.
-function noteServerTime(serverTime, sent, received) {
-  const rtt = received - sent;
-  const stale = Date.now() - state.offsetAt > 60_000;
-  if (rtt <= state.bestRtt || stale) {
-    state.bestRtt = rtt;
-    state.offsetAt = Date.now();
-    state.offsetMs = serverTime - (sent + received) / 2;
-  }
 }
 
 function askForToken() {
@@ -258,11 +251,13 @@ function askForToken() {
 
 let pollTimer = 0;
 async function refresh() {
+  const epoch = state.eggEpoch;
   try {
     const status = await api("/status");
     state.status = status;
     state.failures = 0;
     render(status);
+    if (epoch === state.eggEpoch) syncMirrorWithEgg(status.egg);
   } catch (error) {
     state.failures += 1;
     if (error.status !== 401) renderBridgeDown(error);
@@ -300,7 +295,6 @@ function render(status) {
   renderFaces(status);
   renderTimezone(status);
   renderLibrary(status);
-  syncMirrorWithEgg(status.egg);
 }
 
 function renderPills(status) {
@@ -528,6 +522,7 @@ async function loadFile(file) {
     return;
   }
   if (state.converting) return;
+  stopSound();
   const video = $("#srcVideo");
   try {
     if (state.fileUrl) URL.revokeObjectURL(state.fileUrl);
@@ -557,7 +552,7 @@ async function loadFile(file) {
 
 async function updatePreview() {
   // The same video element plays the sound during board playback.
-  if (!state.videoMeta || state.converting || sound.drift || sound.timer) return;
+  if (!state.videoMeta || state.converting || soundSync?.active) return;
   if (studio.previewBusy) {
     studio.previewAgain = true;
     return;
@@ -606,6 +601,7 @@ async function convertAndUpload() {
     return;
   }
   $("#animName").value = id;
+  stopSound(); // the converter needs the video element; the board keeps playing
   const controller = new AbortController();
   state.converting = controller;
   const video = $("#srcVideo");
@@ -763,30 +759,23 @@ async function deleteAnimation(id) {
 }
 
 async function playOnBoard(id) {
-  const wantSound = $("#soundToggle").checked && Boolean(state.file);
-  const video = $("#srcVideo");
-  if (wantSound) {
-    // Unlock audio playback while we still hold the click's user activation.
-    try {
-      video.muted = false;
-      await video.play();
-      video.pause();
-    } catch {
-      // the board still plays; only the sound is skipped
-    }
-  }
+  const wantSound = $("#soundToggle").checked && Boolean(state.file) && !state.converting;
+  if (wantSound) unlockSound($("#srcVideo"));
+  state.eggEpoch += 1;
   try {
     const result = await api("/egg/play", { method: "POST", json: { id } });
+    state.eggEpoch += 1; // a /status sent while this request was out is stale too
     const egg = result.egg;
     toast(`板子将在 ${Math.max(1, Math.round((egg.startAtMs - serverNow()) / 1000))} 秒后开始播放 ${id}`);
     startMirror({ id, startServerMs: egg.startAtMs, board: true, rev: egg.rev });
     if (wantSound) {
       const clip = clipFor(id);
       if (!clip) toast("没找到这个动画对应的片段起点，声音从视频开头播放");
-      startSound(egg.startAtMs, clip?.clipStart || 0);
+      startSound(egg, clip?.clipStart || 0);
     }
     refresh();
   } catch (error) {
+    if (wantSound && !soundSync.active) $("#srcVideo").muted = true;
     toast(`没能播放：${error.message}`, "error");
   }
 }
@@ -794,54 +783,68 @@ async function playOnBoard(id) {
 async function stopEgg() {
   stopSound();
   stopMirror();
+  state.eggEpoch += 1;
   try {
     await api("/egg/stop", { method: "POST", json: {} });
   } catch (error) {
     toast(`停止失败：${error.message}`, "error");
   }
+  state.eggEpoch += 1;
   refresh();
 }
 
 // ---------------------------------------------------------------- sound sync
 
-const sound = { timer: 0, drift: 0 };
+let soundSync = null; // SoundSync on #srcVideo, created in boot()
+const sound = { rev: 0 }; // the egg the sound belongs to
 
 function audioOffsetMs() {
   return Number($("#audioOffset").value) || 0;
 }
 
-function startSound(startServerMs, clipStart) {
-  stopSound();
-  const video = $("#srcVideo");
+// Safari lets a page start sound later only from an element it played during
+// a click. play() and pause() in the same task unlock it without a sound.
+function unlockSound(video) {
   video.muted = false;
-  video.playbackRate = 1;
-  const localStart = () => startServerMs - state.offsetMs + audioOffsetMs();
-  const expected = () => clipStart + (Date.now() - localStart()) / 1000;
-  const kick = () => {
-    const wait = localStart() - Date.now();
-    if (wait > 20) {
-      sound.timer = setTimeout(kick, Math.min(250, wait - 10));
-      return;
+  try {
+    video.play()?.catch?.(() => {});
+  } catch {
+    // older engines without a play() promise
+  }
+  video.pause();
+}
+
+function startSound(egg, clipStart) {
+  const startServerMs = egg.startAtMs;
+  const lengthS = Number.isFinite(egg.endsAtMs) ? Math.max(0, (egg.endsAtMs - egg.startAtMs) / 1000) : Infinity;
+  sound.rev = egg.rev;
+  soundSync.start({
+    from: clipStart,
+    to: clipStart + lengthS,
+    // Read on every check: offset slider moves and clock updates apply while playing.
+    position: (nowMs) => clipStart + (nowMs + serverClock.offsetMs - startServerMs - audioOffsetMs()) / 1000,
+    onEnd: () => {
+      sound.rev = 0;
+      rememberSoundLatency();
+    },
+    onBlocked: () => {
+      sound.rev = 0;
+      toast("浏览器拦下了声音，点一下页面再试", "error");
     }
-    video.currentTime = Math.max(clipStart, expected());
-    video.play().catch(() => toast("浏览器拦下了声音，点一下页面再试", "error"));
-    sound.drift = setInterval(() => {
-      if (video.paused) return;
-      const drift = video.currentTime - expected();
-      if (Math.abs(drift) > 0.12) video.currentTime = expected();
-    }, 1500);
-  };
-  kick();
+  });
 }
 
 function stopSound() {
-  clearTimeout(sound.timer);
-  clearInterval(sound.drift);
-  sound.timer = 0;
-  sound.drift = 0;
-  const video = $("#srcVideo");
-  if (!state.converting && !video.paused) video.pause();
-  video.muted = true;
+  sound.rev = 0;
+  if (!soundSync?.active) return;
+  soundSync.stop();
+  rememberSoundLatency();
+}
+
+// How long this browser and sound output take from play() to sound, so the
+// next start (also after a reload) is in step from the first moment.
+function rememberSoundLatency() {
+  if (soundSync?.startLatencyMs > 0) store(STORAGE_LATENCY, String(Math.round(soundSync.startLatencyMs)));
 }
 
 // ---------------------------------------------------------------- mirror
@@ -852,6 +855,7 @@ const mirror = {
   mode: "idle",
   raf: 0,
   rev: 0,
+  doneRev: 0, // a board egg this page already played to the end
   iterator: null,
   index: -1,
   frame: null,
@@ -909,6 +913,8 @@ async function startMirror({ id, startServerMs, board, rev = 0 }) {
       if (board) $("#eggPhase").textContent = `播放中 · ${id}`;
       const target = Math.floor(elapsed * fps);
       if (target >= header.frameCount) {
+        // The bridge keeps reporting the egg for a few seconds after the end.
+        if (board) mirror.doneRev = rev;
         stopMirror();
         return;
       }
@@ -950,12 +956,14 @@ function previewLocally(id) {
 // Follows eggs started elsewhere (the board's secret gesture, the menu bar app).
 function syncMirrorWithEgg(egg) {
   if (egg?.playing) {
+    if (sound.rev && sound.rev !== egg.rev) stopSound(); // another egg took over
+    if (mirror.doneRev === egg.rev) return;
     if (mirror.mode !== "board" || mirror.rev !== egg.rev) {
       startMirror({ id: egg.id, startServerMs: egg.startAtMs, board: true, rev: egg.rev });
     }
-  } else if (mirror.mode === "board") {
-    stopMirror();
-    stopSound();
+  } else {
+    if (mirror.mode === "board") stopMirror();
+    if (sound.rev) stopSound();
   }
 }
 
@@ -1033,6 +1041,9 @@ function wire() {
   $("#cancelBtn").addEventListener("click", () => state.converting?.abort());
 
   $("#stopEgg").addEventListener("click", stopEgg);
+  $("#soundToggle").addEventListener("change", (event) => {
+    if (!event.target.checked) stopSound();
+  });
   const offset = recall(STORAGE_OFFSET);
   if (offset !== null) $("#audioOffset").value = offset;
   const showOffset = () => {
@@ -1057,6 +1068,9 @@ function boot() {
   mirror.idleImage.src = "previews/egg-builtin.png";
   drawIdle();
   $("#srcVideo").muted = true;
+  soundSync = new SoundSync($("#srcVideo"));
+  const latency = Number(recall(STORAGE_LATENCY));
+  if (latency > 0 && latency <= soundSync.options.maxStartLatencyMs) soundSync.startLatencyMs = latency;
   buildFaces();
   wire();
   updateEstimate();
