@@ -120,10 +120,17 @@
         <div class="controls">
           <label class="field"><span>尺寸</span>
             <select id="sizeSelect">
-              <option value="full">铺满 400×300</option>
+              <option value="full">400×300</option>
               <option value="half">200×150（板子放大 2 倍，省流量）</option>
             </select>
           </label>
+          <label class="field" title="填满：画面比屏幕宽时裁掉两边；完整：不裁，屏幕上留出空白"><span>画面</span>
+            <select id="framingSelect">
+              <option value="fill">填满屏幕（裁边）</option>
+              <option value="fit">完整画面（留边）</option>
+            </select>
+          </label>
+          <label class="check" title="视频自带的黑边（比如 16:9 视频里的 4:3 画面）会被裁掉，不占屏幕"><input type="checkbox" id="trimBars" checked> 去掉自带黑边 <span class="check-note" id="bordersInfo"></span></label>
           <label class="field"><span>帧率</span>
             <select id="fpsSelect">
               <option value="10">10 fps</option>

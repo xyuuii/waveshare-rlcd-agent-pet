@@ -4,13 +4,14 @@ import {
   PanelPainter,
   SIZE_PRESETS,
   convertVideo,
-  fitSize,
+  detectBorders,
   loadVideo,
   sanitizeAnimationId,
   seekTo,
   suggestAnimationId,
   supportsFrameCallbacks
 } from "./converter.js";
+import { describeTrim, frameLayout } from "./framing.js";
 import { ServerClock, SoundSync } from "./sound-sync.js";
 
 // ---------------------------------------------------------------- constants
@@ -53,6 +54,7 @@ const STORAGE_TOKEN = "rlcdpet.token";
 const STORAGE_CLIPS = "rlcdpet.clips";
 const STORAGE_OFFSET = "rlcdpet.audioOffset";
 const STORAGE_LATENCY = "rlcdpet.soundStartLatency";
+const STORAGE_FRAMING = "rlcdpet.framing";
 
 // ---------------------------------------------------------------- helpers
 
@@ -186,6 +188,8 @@ const state = {
   file: null,
   fileUrl: "",
   videoMeta: null,
+  // Black borders baked into the loaded video: { url, busy, done, box }
+  borders: null,
   mode: "threshold",
   converting: null,
   lastConverted: null,
@@ -492,10 +496,42 @@ const studio = {
   previewAgain: false
 };
 
-function currentSize() {
+// Output size and the part of the video it shows (rect, in video pixels).
+function currentLayout() {
   const preset = SIZE_PRESETS[$("#sizeSelect").value] || SIZE_PRESETS.full;
   const meta = state.videoMeta || { width: 4, height: 3 };
-  return fitSize(meta.width, meta.height, preset.maxWidth, preset.maxHeight);
+  const trim = $("#trimBars").checked && state.borders?.url === state.fileUrl;
+  return frameLayout(meta.width, meta.height, {
+    content: trim ? state.borders.box : null,
+    framing: $("#framingSelect").value,
+    maxWidth: preset.maxWidth,
+    maxHeight: preset.maxHeight
+  });
+}
+
+// Runs once per loaded video; the preview and estimate update when it is done.
+function findBorders() {
+  const url = state.fileUrl;
+  const job = { url, busy: true, done: null, box: null };
+  state.borders = job;
+  job.done = detectBorders(url, {
+    onProgress: (done, total) => {
+      if (state.borders === job) $("#bordersInfo").textContent = `检测黑边 ${done}/${total}…`;
+    }
+  })
+    .then((box) => {
+      job.box = box;
+    })
+    .catch(() => {
+      job.box = null; // the picture is used as it is
+    })
+    .finally(() => {
+      job.busy = false;
+      if (state.borders !== job) return;
+      updateEstimate();
+      updatePreview();
+    });
+  updateEstimate();
 }
 
 function bitmapOptions() {
@@ -546,7 +582,7 @@ async function loadFile(file) {
   $("#animName").placeholder = suggestAnimationId(file.name);
   $("#soundToggleWrap").title = "";
   $("#soundToggle").disabled = false;
-  updateEstimate();
+  findBorders();
   await updatePreview();
 }
 
@@ -561,7 +597,7 @@ async function updatePreview() {
   try {
     do {
       studio.previewAgain = false;
-      const { width, height } = currentSize();
+      const { width, height, rect } = currentLayout();
       if (!studio.processor || studio.processor.width !== width || studio.processor.height !== height) {
         studio.processor = new FrameProcessor(width, height);
       }
@@ -570,7 +606,7 @@ async function updatePreview() {
       const video = $("#srcVideo");
       const target = Math.min(end - 0.01, start + fraction * (end - start));
       if (Math.abs(video.currentTime - target) > 0.001) await seekTo(video, Math.max(0, target));
-      studio.painter.draw(studio.processor.bitmapFrom(video, bitmapOptions()), width, height);
+      studio.painter.draw(studio.processor.bitmapFrom(video, bitmapOptions(), rect), width, height);
     } while (studio.previewAgain);
   } catch (error) {
     toast(error.message, "error");
@@ -581,7 +617,8 @@ async function updatePreview() {
 
 function updateEstimate() {
   if (!state.videoMeta) return;
-  const { width, height } = currentSize();
+  renderBordersInfo();
+  const { width, height } = currentLayout();
   const { start, end } = clipRange();
   const fps = Number($("#fpsSelect").value);
   const frames = Math.max(1, Math.floor((end - start) * fps));
@@ -590,6 +627,18 @@ function updateEstimate() {
   $("#estimate").textContent =
     `${frames} 帧 · ${width}×${height}${scale > 1 ? `（板上放大 ${scale} 倍）` : ""} · ${fps} fps · ${formatDuration(end - start)} · ${method}`;
   $("#thresholdField").hidden = state.mode !== "threshold";
+}
+
+function renderBordersInfo() {
+  const node = $("#bordersInfo");
+  const job = state.borders;
+  if (!job || job.url !== state.fileUrl) node.textContent = "";
+  else if (job.busy) node.textContent = node.textContent || "检测黑边…";
+  else if (!job.box) node.textContent = "没有黑边";
+  else {
+    const where = describeTrim(job.box, state.videoMeta.width, state.videoMeta.height);
+    node.textContent = $("#trimBars").checked ? `已去掉黑边（${where}）` : `有黑边（${where}）`;
+  }
 }
 
 async function convertAndUpload() {
@@ -605,17 +654,22 @@ async function convertAndUpload() {
   const controller = new AbortController();
   state.converting = controller;
   const video = $("#srcVideo");
-  const { width, height } = currentSize();
-  const { start, end } = clipRange();
-  const fps = Number($("#fpsSelect").value);
   const precise = $("#precise").checked;
   setStudioBusy(true, !precise && supportsFrameCallbacks());
+  if (state.borders?.busy) {
+    $("#progressText").textContent = "等黑边检测完…";
+    await state.borders.done;
+  }
+  const { width, height, rect } = currentLayout();
+  const { start, end } = clipRange();
+  const fps = Number($("#fpsSelect").value);
   const began = performance.now();
   let lastDraw = 0;
   try {
     const result = await convertVideo(video, {
       width,
       height,
+      rect,
       fps,
       start,
       end,
@@ -1022,8 +1076,14 @@ function wire() {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(updatePreview, 40);
   };
-  for (const id of ["#sizeSelect", "#fpsSelect", "#threshold", "#invert", "#clipStart", "#clipEnd", "#precise", "#scrub"]) {
+  for (const id of ["#sizeSelect", "#framingSelect", "#trimBars", "#fpsSelect", "#threshold", "#invert", "#clipStart", "#clipEnd", "#precise", "#scrub"]) {
     $(id).addEventListener("input", schedulePreview);
+  }
+  const framing = recall(STORAGE_FRAMING, true);
+  if (framing?.mode === "fit" || framing?.mode === "fill") $("#framingSelect").value = framing.mode;
+  if (typeof framing?.trim === "boolean") $("#trimBars").checked = framing.trim;
+  for (const id of ["#framingSelect", "#trimBars"]) {
+    $(id).addEventListener("change", () => store(STORAGE_FRAMING, { mode: $("#framingSelect").value, trim: $("#trimBars").checked }));
   }
   $("#threshold").addEventListener("input", (event) => {
     $("#thresholdValue").textContent = event.target.value;

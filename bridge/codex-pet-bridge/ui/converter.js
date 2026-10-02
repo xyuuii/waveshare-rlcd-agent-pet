@@ -3,30 +3,11 @@
 // shows at start + i / fps, the same rule the board uses when it plays back.
 
 import { RlaEncoder, grayToBitmap, rgbaToGray } from "./rla-codec.js";
+import { PANEL_HEIGHT, PANEL_WIDTH, SIZE_PRESETS, findContentBox, fitSize, panelScale, scaleBox } from "./framing.js";
 
-export const PANEL_WIDTH = 400;
-export const PANEL_HEIGHT = 300;
+export { PANEL_HEIGHT, PANEL_WIDTH, SIZE_PRESETS, fitSize, panelScale };
 export const INK = [35, 38, 42];
 export const PAPER = [214, 217, 207];
-
-export const SIZE_PRESETS = {
-  full: { maxWidth: 400, maxHeight: 300 },
-  half: { maxWidth: 200, maxHeight: 150 }
-};
-
-export function fitSize(sourceWidth, sourceHeight, maxWidth, maxHeight) {
-  if (!sourceWidth || !sourceHeight) return { width: maxWidth, height: maxHeight };
-  const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight);
-  return {
-    width: Math.max(8, Math.min(maxWidth, Math.round(sourceWidth * scale))),
-    height: Math.max(8, Math.min(maxHeight, Math.round(sourceHeight * scale)))
-  };
-}
-
-// Same integer scale the firmware picks (anim_codec.cpp animFitScale).
-export function panelScale(width, height) {
-  return Math.max(1, Math.min(Math.floor(PANEL_WIDTH / width), Math.floor(PANEL_HEIGHT / height)));
-}
 
 export class FrameProcessor {
   constructor(width, height) {
@@ -40,11 +21,64 @@ export class FrameProcessor {
     this.context.imageSmoothingQuality = "high";
   }
 
-  bitmapFrom(source, options) {
+  // rect: the part of the source to use ({x, y, w, h} in source pixels), or null for all of it.
+  bitmapFrom(source, options, rect = null) {
     const { context, width, height } = this;
-    context.drawImage(source, 0, 0, width, height);
+    if (rect) context.drawImage(source, rect.x, rect.y, rect.w, rect.h, 0, 0, width, height);
+    else context.drawImage(source, 0, 0, width, height);
     const { data } = context.getImageData(0, 0, width, height);
     return grayToBitmap(rgbaToGray(data, width, height), width, height, options);
+  }
+}
+
+/**
+ * Looks for black borders baked into the video (a 4:3 picture inside a 16:9
+ * file, letterboxed films). Seeks a hidden copy of the video to `samples`
+ * points and keeps, per row and column, the brightest value seen.
+ * Resolves to {x, y, w, h} in source pixels, or null when there are none.
+ */
+export async function detectBorders(url, { samples = 12, gridWidth = 480, signal, onProgress } = {}) {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.preload = "auto";
+  video.playsInline = true;
+  try {
+    await new Promise((resolve, reject) => {
+      video.addEventListener("loadedmetadata", resolve, { once: true });
+      video.addEventListener("error", () => reject(new Error("视频无法解码")), { once: true });
+      video.src = url;
+    });
+    const { videoWidth, videoHeight, duration } = video;
+    if (!videoWidth || !videoHeight || !Number.isFinite(duration) || duration <= 0) return null;
+    const gridHeight = Math.max(8, Math.round((gridWidth * videoHeight) / videoWidth));
+    const canvas = document.createElement("canvas");
+    canvas.width = gridWidth;
+    canvas.height = gridHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true, alpha: false });
+    const rowMax = new Uint8Array(gridHeight);
+    const colMax = new Uint8Array(gridWidth);
+    for (let i = 0; i < samples; i += 1) {
+      if (signal?.aborted) throw abortError();
+      // Spread over the whole video, away from fades at either end.
+      await seekTo(video, duration * (0.04 + (0.92 * (i + 0.5)) / samples));
+      context.drawImage(video, 0, 0, gridWidth, gridHeight);
+      const { data } = context.getImageData(0, 0, gridWidth, gridHeight);
+      for (let y = 0, p = 0; y < gridHeight; y += 1) {
+        let row = rowMax[y];
+        for (let x = 0; x < gridWidth; x += 1, p += 4) {
+          const value = Math.max(data[p], data[p + 1], data[p + 2]);
+          if (value > row) row = value;
+          if (value > colMax[x]) colMax[x] = value;
+        }
+        rowMax[y] = row;
+      }
+      onProgress?.(i + 1, samples);
+    }
+    const box = findContentBox(rowMax, colMax);
+    return box ? scaleBox(box, gridWidth, gridHeight, videoWidth, videoHeight) : null;
+  } finally {
+    video.removeAttribute("src");
+    video.load();
   }
 }
 
@@ -172,6 +206,7 @@ export function supportsFrameCallbacks() {
  *   fps             target frame rate
  *   start, end      clip in seconds
  *   bitmap          { mode, threshold, invert } for grayToBitmap
+ *   rect            part of the source frame to use ({x, y, w, h}), or null
  *   precise         seek frame by frame instead of sampling playback
  *   signal          AbortSignal
  *   onProgress      ({ done, total, bytes, stats }) => void
@@ -192,13 +227,13 @@ export async function convertVideo(video, options) {
 }
 
 async function captureBySeeking(video, context) {
-  const { total, fps, start, processor, encoder, bitmap, signal, onProgress, onFrame } = context;
+  const { total, fps, start, processor, encoder, bitmap, rect, signal, onProgress, onFrame } = context;
   video.pause();
   const lastTime = Math.max(0, video.duration - 0.001);
   for (let index = 0; index < total; index += 1) {
     if (signal?.aborted) throw abortError();
     await seekTo(video, Math.min(lastTime, start + index / fps + 0.0005));
-    const frame = processor.bitmapFrom(video, bitmap);
+    const frame = processor.bitmapFrom(video, bitmap, rect);
     encoder.addFrame(frame);
     onFrame?.(frame);
     if (index % 5 === 0 || index === total - 1) {
@@ -208,7 +243,7 @@ async function captureBySeeking(video, context) {
 }
 
 function captureByPlayback(video, context) {
-  const { total, fps, start, end, processor, encoder, bitmap, signal, onProgress, onFrame } = context;
+  const { total, fps, start, end, processor, encoder, bitmap, rect, signal, onProgress, onFrame } = context;
   // Stay well inside what one display refresh can deliver, so no target frame
   // is skipped: about 45 target frames per second of wall time.
   const rate = Math.max(1, Math.min(4, Math.floor(45 / fps)));
@@ -252,7 +287,7 @@ function captureByPlayback(video, context) {
     const onFrameCallback = (_now, metadata) => {
       if (finished) return;
       const time = metadata.mediaTime;
-      const frame = processor.bitmapFrom(video, bitmap);
+      const frame = processor.bitmapFrom(video, bitmap, rect);
       if (!previous) previous = frame;  // the first frame also covers anything before it
       emitBefore(time);
       previous = frame;

@@ -82,7 +82,9 @@ exact, but the reflective panel looks different in a room.
 
 In the dashboard's easter-egg studio (彩蛋工坊), drop in a local video, for
 example your own copy of *Bad Apple!!*. The browser turns it into 1-bit frames
-(threshold or dither, 10–30 fps, full screen or half size). Only those frames
+(threshold or dither, 10–30 fps, full screen or half size). Black borders baked
+into the video, such as a 4:3 picture inside a 16:9 file, are found and trimmed,
+and the picture either fills the screen or is shown whole. Only those frames
 are uploaded to the bridge on your Mac; the video never leaves the browser.
 Press play and the board streams the frames in 16 KB chunks, on a schedule
 shared with the Mac, so the Mac can play the video's sound in sync. Holding
